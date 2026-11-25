@@ -1,0 +1,43 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "domain-i"
+version = "0.1.0"
+description = "Quick domain lookup: concise WHOIS/RDAP summary, or availability of a name across TLDs."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.10"
+dependencies = ["wordninja>=2.0"]
+classifiers = [
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Topic :: Internet :: Name Service (DNS)",
+]
+
+[project.scripts]
+domain-i = "domain_i.cli:run"
+
+[dependency-groups]
+dev = ["pytest>=8", "mypy>=1.10"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/domain_i"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["tests"]
+addopts = "-q"
+
+[tool.mypy]
+strict = true
+mypy_path = ["src", "tests"]
+files = ["src", "tests"]
+disallow_any_explicit = true
+
+[[tool.mypy.overrides]]
+module = ["wordninja"]
+ignore_missing_imports = true
