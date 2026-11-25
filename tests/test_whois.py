@@ -155,3 +155,32 @@ def test_run_whois_missing_binary() -> None:
 
     result = run_whois("example.com", runner=runner)
     assert result.error is not None
+
+
+def test_rs_small_site_individual_registrant_is_hidden() -> None:
+    info = parse_whois(whois_fixture("lobste.rs")).info
+    assert info is not None
+    assert info.created == date(2011, 12, 13)
+    assert info.updated == date(2025, 3, 17)
+    assert info.expires == date(2029, 12, 13)
+    assert info.registrar == "Mainstream Public Cloud Services d.o.o."
+    assert info.privacy == "yes (Individual)"
+    assert info.nameservers[0] == "ns1.dnsimple.com"
+
+
+def test_jp_bracket_format() -> None:
+    info = parse_whois(whois_fixture("google.jp")).info
+    assert info is not None
+    assert info.created == date(2005, 5, 30)
+    assert info.expires == date(2027, 5, 31)
+    assert info.updated == date(2026, 6, 1)
+    assert info.privacy == "no (Google LLC)"
+    assert info.nameservers == ("ns1.google.com", "ns2.google.com", "ns3.google.com", "ns4.google.com")
+
+
+def test_eu_indented_block_format() -> None:
+    info = parse_whois(whois_fixture("europa.eu")).info
+    assert info is not None
+    assert info.registrar == "ClearMedia NV"
+    assert info.privacy == "yes (NOT DISCLOSED!)"
+    assert info.nameservers[:3] == ("ns2lux.europa.eu", "ans1.cw.net", "ns3bru.europa.eu")

@@ -72,6 +72,8 @@ def test_original_domain_is_first_row_and_not_duplicated() -> None:
     assert [r.domain for r in report.rows][:2] == ["foobar.io", "foobar.com"]
     report2 = run_availability(("foo", "bar"), ALL, "foobar.com", FakeChecker({}))
     assert [r.domain for r in report2.rows] == ["foobar.com", "foobar.net", "foobar.org", "foobar.app"]
+    report3 = run_availability(("foo", "bar"), ALL, "foobar.app", FakeChecker({}))
+    assert [r.domain for r in report3.rows] == ["foobar.app", "foobar.com", "foobar.net", "foobar.org"]
 
 
 def test_original_domain_status_does_not_block_hyphen() -> None:
@@ -168,7 +170,7 @@ def test_premium_price_only_shown_for_available() -> None:
         (".COM .Io  dev", ("com", "io", "dev")),
         ("com, com ,net,.com", ("com", "net")),
         ("co.uk, .CO.UK,app", ("co.uk", "app")),
-        ("com,in valid!,net", ("com", "net")),
+        ("com,inv@lid!,net", ("com", "net")),
     ],
 )
 def test_parse_tlds_is_lenient(raw: str, expected: tuple[str, ...]) -> None:

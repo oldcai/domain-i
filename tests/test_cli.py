@@ -67,6 +67,17 @@ class Harness:
         return self.stdout.getvalue()
 
 
+def table_rows(out: str) -> list[str]:
+    lines = ANSI.sub("", out).splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("Domain "))
+    rows = []
+    for line in lines[start + 1 :]:
+        if not line.strip():
+            break
+        rows.append(line)
+    return rows
+
+
 def no_spaceship_rdap(states: dict[str, int]) -> dict[str, Response | Exception]:
     routes: dict[str, Response | Exception] = {BOOTSTRAP_URL: Response(200, rdap_fixture("dns.json"))}
     for domain, code in states.items():
@@ -78,7 +89,7 @@ def no_spaceship_rdap(states: dict[str, int]) -> dict[str, Response | Exception]
             "app": GOOGLE_RDAP,
             "dev": GOOGLE_RDAP,
         }[tld]
-        routes[base + domain] = Response(code, b"{}")
+        routes[base + domain] = Response(code, b'{"objectClassName": "domain"}')
     return routes
 
 
@@ -131,7 +142,7 @@ def test_app_verbose_prints_rdap_json(tmp_path: Path) -> None:
 
 
 def test_unregistered_domain_enters_availability_mode(tmp_path: Path) -> None:
-    name = "xq7zvkpl3qwm-notreal"
+    name = "xq7zvkpl3qwmnotreal"
     h = Harness(tmp_path, whois={f"{name}.com": whois_fixture("unregistered.com")})
     h.http.routes.update(
         no_spaceship_rdap({f"{name}.com": 404, f"{name}.net": 404, f"{name}.org": 404, f"{name}.app": 404})
@@ -140,9 +151,22 @@ def test_unregistered_domain_enters_availability_mode(tmp_path: Path) -> None:
     lines = h.out.splitlines()
     assert lines[0] == f"{name}.com  NOT REGISTERED"
     assert "No match" in lines[1]
-    table = [line for line in lines if line.startswith(name)]
+    table = table_rows(h.out)
     assert table[0].split()[:2] == [f"{name}.com", "available"]
     assert len(table) == 4  # .com not repeated; hyphen variants skipped because some are available
+
+
+def test_unregistered_hyphenated_domain_keeps_original_first(tmp_path: Path) -> None:
+    h = Harness(tmp_path, whois={"foo-bar.com": "No match for domain \"FOO-BAR.COM\".\n"})
+    states = {f"foobar.{t}": 200 for t in ("com", "net", "org", "app")}
+    states |= {f"foo-bar.{t}": 404 for t in ("com", "net", "org", "app")}
+    h.http.routes.update(no_spaceship_rdap(states))
+    assert h.run("foo-bar.com") == 0
+    domains = [line.split()[0] for line in table_rows(h.out)]
+    assert domains == [
+        "foo-bar.com", "foobar.com", "foobar.net", "foobar.org", "foobar.app",
+        "foo-bar.net", "foo-bar.org", "foo-bar.app",
+    ]
     assert "Backend: RDAP" in h.out
 
 

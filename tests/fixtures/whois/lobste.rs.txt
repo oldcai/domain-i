@@ -1,0 +1,94 @@
+% IANA WHOIS server
+% for more information on IANA, visit http://www.iana.org
+% This query returned 1 object
+
+refer:        whois.rnids.rs
+
+domain:       RS
+
+organisation: Serbian National Internet Domain Registry (RNIDS)
+address:      Zorza Klemansoa 18a
+address:      Belgrade 11008
+address:      Serbia
+
+contact:      administrative
+name:         RNIDS Admin Contact
+organisation: Serbian National Internet Domain Registry (RNIDS)
+address:      Zorza Klemansoa 18a
+address:      Belgrade 11108
+address:      Serbia
+phone:        +381 11 7281281
+fax-no:       +381 11 7281282
+e-mail:       tld-admin@rnids.rs
+
+contact:      technical
+name:         RNIDS Tech Contact
+organisation: Serbian National Internet Domain Registry (RNIDS)
+address:      Zorza Klemansoa 18a
+address:      Belgrade 11108
+address:      Serbia
+phone:        +381 11 7281281
+fax-no:       +381 11 7281282
+e-mail:       tld-tech@rnids.rs
+
+nserver:      A.NIC.RS 2001:67c:69c:0:0:0:0:59 91.199.17.59
+nserver:      B.NIC.RS 195.178.32.2 2a00:e90:0:3:0:0:0:3
+nserver:      C.NIC.RS 2a0e:dbc0:2:0:0:0:0:81 45.142.220.81
+nserver:      F.NIC.RS 2001:500:14:6032:ad:0:0:1 204.61.216.32
+nserver:      H.NIC.RS 2001:67c:69c:0:0:0:0:60 91.199.17.60
+nserver:      L.NIC.RS 194.146.106.114 2001:67c:1010:29:0:0:0:53
+ds-rdata:     57382 13 2 9aca8316c4ce272097297cf5700e8a66e00ad0c83c4165bfcc90659438dc1794
+
+whois:        whois.rnids.rs
+
+status:       ACTIVE
+remarks:      Registration information: http://www.rnids.rs
+
+created:      2007-09-24
+changed:      2025-02-06
+source:       IANA
+
+# whois.rnids.rs
+
+
+% The data in the Whois database are provided by RNIDS
+% for information purposes only and to assist persons in obtaining
+% information about or related to a domain name registration record. 
+% Data in the database are created by registrants and we do not guarantee 
+% their accuracy. We reserve the right to remove access 
+% for entities abusing the data, without notice.
+% All timestamps are given in Serbian local time. 
+%
+Domain name: lobste.rs
+Domain status: Active https://www.rnids.rs/en/domain-name-status-codes#Active
+Registration date: 13.12.2011 10:00:16
+Modification date: 17.03.2025 19:54:44
+Expiration date: 13.12.2029 10:00:16
+Confirmed: 13.12.2011 10:00:16
+Registrar: Mainstream Public Cloud Services d.o.o.
+
+
+Registrant: Individual
+
+Administrative contact: Marcaria.com Corp
+Address: 1000177, 22 Grace Church St, New York, United States of America
+Postal Code: 
+ID Number: 4104929 
+Tax ID: 
+
+Technical contact: Marcaria.com Corp
+Address: 1000177, 22 Grace Church St, New York, United States of America
+Postal Code: 
+ID Number: 4104929 
+Tax ID: 
+
+
+DNS: ns1.dnsimple.com - 
+DNS: ns2.dnsimple.com - 
+DNS: ns3.dnsimple.com - 
+DNS: ns4.dnsimple.com - 
+
+
+DNSSEC signed: no
+
+Whois Timestamp: 25.11.2026 16:32:16

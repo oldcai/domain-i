@@ -60,7 +60,7 @@ def test_check_parses_status_and_premium_price() -> None:
     results = check(http, CREDS, ["google.com", "xq7zvkpl3qwm.com", "cash.app", "xq7zvkpl3qwm.app"])
     assert results["google.com"].status == "taken"
     assert results["xq7zvkpl3qwm.com"].status == "available"
-    assert results["xq7zvkpl3qwm.com"].price is None
+    assert results["xq7zvkpl3qwm.com"].premium is None
     assert results["cash.app"].premium == "827.17 USD"
     call = http.calls[0]
     assert call.method == "POST"

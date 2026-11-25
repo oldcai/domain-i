@@ -1,0 +1,49 @@
+"""KEY=VALUE configuration file shared by credentials and options."""
+
+from __future__ import annotations
+
+import os
+from collections.abc import Mapping
+from pathlib import Path
+
+
+def parse_env_file(text: str) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, sep, value = line.partition("=")
+        key = key.strip()
+        if not sep or not key or " " in key:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        values[key] = value
+    return values
+
+
+def config_file(environ: Mapping[str, str], config_dir: Path) -> Path:
+    explicit = environ.get("DOMAIN_I_ENV")
+    return Path(os.path.expanduser(explicit)) if explicit else config_dir / "env"
+
+
+def read_config(environ: Mapping[str, str], config_dir: Path) -> dict[str, str]:
+    """Read ``$DOMAIN_I_ENV`` if set, else ``<config_dir>/env``; missing file means empty."""
+    try:
+        return parse_env_file(config_file(environ, config_dir).read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return {}
+
+
+def default_config_dir(environ: Mapping[str, str]) -> Path:
+    base = environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return Path(base) / "domain-i"
+
+
+def default_cache_dir(environ: Mapping[str, str]) -> Path:
+    base = environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache")
+    return Path(base) / "domain-i"

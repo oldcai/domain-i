@@ -39,6 +39,14 @@ def test_parse_query_single_word_uses_splitter() -> None:
     assert parse_query(["FooBar"], fake_splitter) == NameQuery(("foo", "bar"))
 
 
+def test_split_with_stray_single_letters_is_rejected() -> None:
+    def junk(word: str) -> list[str]:
+        return {"github": ["g", "it", "hub"], "ateam": ["a", "team"]}[word]
+
+    assert parse_query(["github"], junk) == NameQuery(("github",))
+    assert parse_query(["ateam"], junk) == NameQuery(("a", "team"))
+
+
 def test_parse_query_unsplittable_word() -> None:
     assert parse_query(["google"], fake_splitter) == NameQuery(("google",))
 
