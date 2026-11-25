@@ -39,6 +39,7 @@ class Harness:
     isatty: bool = False
     metrics: Callable[[str], list[Metric]] | None = None
     command_output: str | Exception = "{}"
+    command_outputs: dict[str, str | Exception] = field(default_factory=dict)  # by argv[0]
     command_calls: list[list[str]] = field(default_factory=list)
     whois_calls: list[str] = field(default_factory=list)
     whois_override: Callable[[list[str], float], str] | None = None
@@ -56,9 +57,10 @@ class Harness:
 
         def command_runner(argv: list[str], timeout: float) -> str:
             self.command_calls.append(argv)
-            if isinstance(self.command_output, Exception):
-                raise self.command_output
-            return self.command_output
+            output = self.command_outputs.get(argv[0], self.command_output)
+            if isinstance(output, Exception):
+                raise output
+            return output
 
         deps = Deps(
             http=self.http,
@@ -653,3 +655,72 @@ def test_availability_check_starts_while_whois_runs(tmp_path: Path) -> None:
     h.whois_override = slow_whois
     assert h.run("--no-metrics", "google.com") == 0
     assert seen_during_whois == [True]
+
+
+# --- several metrics commands ------------------------------------------------------------
+
+
+def test_two_commands_each_contribute_a_field(tmp_path: Path) -> None:
+    h = _registered(
+        tmp_path,
+        environ={"DOMAIN_I_METRICS_CMD_TRAFFIC": "traffic-tool", "DOMAIN_I_METRICS_CMD_DR": "dr-tool --x"},
+        metrics=_builtin,
+        command_outputs={
+            "traffic-tool": '{"traffic": 745628929, "traffic_month": "2026-10", "source": "t"}',
+            "dr-tool": '{"dr": 97, "source": "ahrefs"}',
+        },
+    )
+    assert h.run("google.io") == 0
+    assert sorted(h.command_calls) == [["dr-tool", "--x", "google.io"], ["traffic-tool", "google.io"]]
+    assert summary_lines(h.out)[-3:] == [
+        "Traffic    745.6M/mo (t, 2026-10)",
+        "DR         97 (ahrefs)",
+        "Rank       #34 (tranco)",
+    ]
+
+
+def test_first_command_in_name_order_wins_for_the_same_field(tmp_path: Path) -> None:
+    h = _registered(
+        tmp_path,
+        environ={
+            "DOMAIN_I_METRICS_CMD_B": "b",
+            "DOMAIN_I_METRICS_CMD": "plain",
+            "DOMAIN_I_METRICS_CMD_A": "a",
+        },
+        command_outputs={
+            "plain": '{"traffic": 0}',  # zero -> no value, falls through
+            "a": '{"traffic": 2000, "dr": 10, "source": "a"}',
+            "b": '{"traffic": 5000, "dr": 50, "source": "b"}',
+        },
+    )
+    h.run("google.io")
+    assert "Traffic    2.0K/mo (a)\n" in h.out
+    assert "DR         10 (a)\n" in h.out
+
+
+def test_one_failing_command_does_not_hide_the_other(tmp_path: Path) -> None:
+    h = _registered(
+        tmp_path,
+        environ={"DOMAIN_I_METRICS_CMD": "broken", "DOMAIN_I_METRICS_CMD_DR": "dr-tool"},
+        command_outputs={"broken": subprocess.TimeoutExpired(["broken"], 8.0), "dr-tool": '{"dr": 20, "source": "x"}'},
+    )
+    assert h.run("-v", "google.io") == 0
+    assert "DR         20 (x)\n" in h.out
+    assert "Traffic" not in h.out
+    assert "DOMAIN_I_METRICS_CMD failed: timed out" in h.stderr.getvalue()
+
+
+def test_env_overrides_same_named_command_and_empty_disables(tmp_path: Path) -> None:
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "config.env").write_text(
+        "DOMAIN_I_METRICS_CMD_TRAFFIC=file-traffic\nDOMAIN_I_METRICS_CMD_DR=file-dr\n"
+    )
+    h = _registered(tmp_path, environ={"DOMAIN_I_METRICS_CMD_DR": "env-dr", "DOMAIN_I_METRICS_CMD_TRAFFIC": ""})
+    h.run("google.io")
+    assert h.command_calls == [["env-dr", "google.io"]]
+
+
+def test_no_metrics_skips_every_command(tmp_path: Path) -> None:
+    h = _registered(tmp_path, environ={"DOMAIN_I_METRICS_CMD": "a", "DOMAIN_I_METRICS_CMD_DR": "b"})
+    h.run("--no-metrics", "google.io")
+    assert h.command_calls == []

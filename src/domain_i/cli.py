@@ -19,13 +19,14 @@ from .http import Http, UrllibHttp
 from .info import DomainInfo
 from .inputs import DomainQuery, InputError, Splitter, name_from_domain, parse_query, words_for
 from .metrics import (
-    COMMAND_VAR,
     CommandRunner,
     Metric,
     MetricsFetcher,
+    combine_command_metrics,
     default_command_runner,
     fetch_metrics,
     merge_metrics,
+    metrics_commands,
     run_metrics_command,
 )
 from .rdap import Rdap, info_from_rdap
@@ -280,15 +281,15 @@ def main(argv: Sequence[str], deps: Deps) -> int:
             state = "unknown"
             reason = "No registration record found via WHOIS or RDAP" + (f" ({why})." if why else ".")
     if info is not None:
-        # Only for registered domains: the user's metrics command (if any) ...
-        command = (deps.environ.get(COMMAND_VAR) or config.get(COMMAND_VAR) or "").strip()
+        # Only for registered domains: the user's metrics commands (if any) ...
         runner = deps.command_runner
         no_result: tuple[list[Metric], str | None] = ([], "did not finish in time")
-        command_job = (
-            _Background(lambda: run_metrics_command(command, domain, runner), no_result, deadline)
-            if command and not args.no_metrics
-            else None
-        )
+
+        def command_job(command: str) -> _Background[tuple[list[Metric], str | None]]:
+            return _Background(lambda: run_metrics_command(command, domain, runner), no_result, deadline)
+
+        commands = [] if args.no_metrics else metrics_commands(deps.environ, config)
+        command_jobs = [(name, command_job(command)) for name, command in commands]
         # ... and, when WHOIS could not decide privacy, the registrar's RDAP record
         # (registries rarely carry registrant data; many registrars dropped port 43).
         registry_data = registry_rdap
@@ -300,11 +301,13 @@ def main(argv: Sequence[str], deps: Deps) -> int:
         privacy = privacy_job.result() if privacy_job is not None else None
         if privacy is not None:
             info = replace(info, privacy=privacy)
-        custom: list[Metric] = []
-        if command_job is not None:
-            custom, command_error = command_job.result()
+        command_results: list[list[Metric]] = []
+        for name, job in command_jobs:
+            found, command_error = job.result()
+            command_results.append(found)
             if command_error and args.verbose:
-                print(f"domain-i: metrics command failed: {command_error}", file=deps.stderr)
+                print(f"domain-i: metrics command {name} failed: {command_error}", file=deps.stderr)
+        custom = combine_command_metrics(command_results)
         builtin = background.result() if background is not None else []
         metrics = merge_metrics(custom, builtin)
         out.write(render_header(domain, "taken", paint) + "\n")

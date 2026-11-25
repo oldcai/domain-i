@@ -12,7 +12,9 @@ from domain_i.metrics import (
     Metric,
     abbreviate,
     fetch_metrics,
+    combine_command_metrics,
     merge_metrics,
+    metrics_commands,
     parse_command_output,
     run_metrics_command,
 )
@@ -174,3 +176,21 @@ def test_merge_order_and_dr_preference() -> None:
         Metric("Rank", "#1", "tranco"),
     ]
     assert merge_metrics([], builtin) == [Metric("DR", "90", "ahrefs"), Metric("Rank", "#1", "tranco")]
+
+
+def test_metrics_commands_discovery_order_and_precedence() -> None:
+    environ = {"DOMAIN_I_METRICS_CMD_Z": "z", "DOMAIN_I_METRICS_CMD": "base", "DOMAIN_I_METRICS_CMDX": "ignored"}
+    config = {"DOMAIN_I_METRICS_CMD_A": "a", "DOMAIN_I_METRICS_CMD_Z": "from-file", "OTHER": "x"}
+    assert metrics_commands(environ, config) == [
+        ("DOMAIN_I_METRICS_CMD", "base"),
+        ("DOMAIN_I_METRICS_CMD_A", "a"),
+        ("DOMAIN_I_METRICS_CMD_Z", "z"),
+    ]
+    assert metrics_commands({"DOMAIN_I_METRICS_CMD_A": "  "}, config) == [("DOMAIN_I_METRICS_CMD_Z", "from-file")]
+    assert metrics_commands({}, {}) == []
+
+
+def test_combine_command_metrics_first_value_per_field_wins() -> None:
+    first = [Metric("Traffic", "1.0K/mo", "a")]
+    second = [Metric("Traffic", "9.0K/mo", "b"), Metric("DR", "50", "b")]
+    assert combine_command_metrics([first, [], second]) == [Metric("Traffic", "1.0K/mo", "a"), Metric("DR", "50", "b")]

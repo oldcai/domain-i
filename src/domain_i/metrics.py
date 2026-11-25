@@ -14,6 +14,7 @@ beyond their own timeout.
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 from collections.abc import Callable, Mapping
@@ -81,13 +82,36 @@ def fetch_metrics(http: Http, domain: str, settings: Mapping[str, str]) -> list[
     return [m for m in found if m is not None]
 
 
-# --- external metrics command (DOMAIN_I_METRICS_CMD) ----------------------------------
+# --- external metrics commands (DOMAIN_I_METRICS_CMD, DOMAIN_I_METRICS_CMD_<NAME>) --------
 #
-# Protocol: the command is run with the domain appended as the last argument
+# Protocol: each command is run with the domain appended as the last argument
 # and prints one JSON object on stdout. All fields are optional:
 #   {"traffic": <monthly visits>, "traffic_month": "YYYY-MM", "dr": <0-100>, "source": "<name>"}
+# Several commands may be configured; they run concurrently and, per field,
+# the first command (bare name first, then by name) that gives a value wins.
 
 COMMAND_VAR = "DOMAIN_I_METRICS_CMD"
+_COMMAND_NAME = re.compile(r"^DOMAIN_I_METRICS_CMD(?:_[A-Za-z0-9_]+)?$")
+
+
+def metrics_commands(environ: Mapping[str, str], config: Mapping[str, str]) -> list[tuple[str, str]]:
+    """(variable, command) pairs, ordered: the bare variable first, then by name.
+
+    The environment overrides a same-named config entry; an empty value disables it.
+    """
+    merged = {k: v for k, v in config.items() if _COMMAND_NAME.match(k)}
+    merged.update({k: v for k, v in environ.items() if _COMMAND_NAME.match(k)})
+    names = sorted(merged, key=lambda name: (name != COMMAND_VAR, name))
+    return [(name, merged[name].strip()) for name in names if merged[name].strip()]
+
+
+def combine_command_metrics(results: list[list[Metric]]) -> list[Metric]:
+    """Per label, keep the first value in command order."""
+    combined: dict[str, Metric] = {}
+    for metrics in results:
+        for metric in metrics:
+            combined.setdefault(metric.label, metric)
+    return list(combined.values())
 COMMAND_TIMEOUT = 8.0
 
 CommandRunner = Callable[[list[str], float], str]
@@ -141,9 +165,9 @@ def run_metrics_command(command: str, domain: str, runner: CommandRunner) -> tup
     try:
         args = [os.path.expanduser(a) for a in shlex.split(command)]
     except ValueError as exc:
-        return [], f"cannot parse {COMMAND_VAR}: {exc}"
+        return [], f"cannot parse the command: {exc}"
     if not args:
-        return [], f"{COMMAND_VAR} is empty"
+        return [], "empty command"
     try:
         output = runner([*args, domain], COMMAND_TIMEOUT)
     except subprocess.TimeoutExpired:

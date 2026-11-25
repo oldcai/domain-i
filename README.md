@@ -176,6 +176,14 @@ If you have another source of traffic or authority numbers, point
 in the background with the domain appended as the last argument, without a
 shell (`~` in arguments is expanded), and waits at most 8 seconds.
 
+To combine several sources, add more variables named
+`DOMAIN_I_METRICS_CMD_<NAME>` (for example `DOMAIN_I_METRICS_CMD_TRAFFIC` and
+`DOMAIN_I_METRICS_CMD_DR`). All configured commands run concurrently. For each
+field, the first command that returns a usable value wins, in this order: the
+bare `DOMAIN_I_METRICS_CMD` first, then the others sorted by name. An
+environment variable overrides the config entry of the same name, and an empty
+value disables it.
+
 The command prints one JSON object on stdout. Every field is optional and
 unknown fields are ignored:
 
@@ -200,6 +208,8 @@ print(json.dumps({"traffic": 1234567, "traffic_month": "2026-10", "dr": 42, "sou
 ```
 # ~/.config/domain-i/config.env
 DOMAIN_I_METRICS_CMD=~/bin/acme-metrics
+# optional second source, e.g. one that only knows an authority score:
+DOMAIN_I_METRICS_CMD_DR=~/bin/other-authority
 ```
 
 ```
@@ -211,7 +221,7 @@ Rank       #34 (tranco)
 Rows appear in the order Traffic, DR, Rank. A `dr` from the command replaces
 the Ahrefs row. Missing, zero or non-numeric values, a non-zero exit status, a
 timeout or output that is not a JSON object simply leave the rows out; run with
-`-v` to see why on stderr. `--no-metrics` skips the command.
+`-v` to see why on stderr. `--no-metrics` skips every command.
 
 ### Colour
 
