@@ -8,10 +8,10 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from pathlib import Path
-from typing import TextIO
+from typing import Generic, TextIO, TypeVar
 
 from .availability import CheckResult, Report, check_domains, resolve_tlds, run_availability
 from .config import default_cache_dir, default_config_dir, read_config
@@ -24,7 +24,7 @@ from .spaceship import Availability, check, load_credentials
 from .whois import WhoisRunner, default_runner, parse_whois, run_whois
 
 WHOIS_TIMEOUT = 10.0
-METRICS_GRACE = 9.0  # seconds after start we are willing to wait for metrics
+BACKGROUND_BUDGET = 9.0  # seconds after start we wait for metrics / registrar privacy
 
 RESET = "\x1b[0m"
 COLORS = {
@@ -90,13 +90,13 @@ def build_parser() -> argparse.ArgumentParser:
 # --- rendering -------------------------------------------------------------------
 
 
-def _fmt_date(value: date | None) -> str:
-    return value.isoformat() if value else "-"
+def _fmt_date(value: date | None) -> str | None:
+    return value.isoformat() if value else None
 
 
-def _fmt_expires(value: date | None, today: date) -> str:
+def _fmt_expires(value: date | None, today: date) -> str | None:
     if value is None:
-        return "-"
+        return None
     days = (value - today).days
     if days > 0:
         return f"{value.isoformat()} ({days} day{'s' if days != 1 else ''} left)"
@@ -110,52 +110,64 @@ def render_header(domain: str, state: str, paint: Painter) -> str:
 
 
 def render_info(info: DomainInfo, today: date, metrics: Sequence[Metric], paint: Painter) -> list[str]:
-    rows = [
+    rows: list[tuple[str, str | None]] = [
         ("Created", _fmt_date(info.created)),
         ("Updated", _fmt_date(info.updated)),
         ("Expires", _fmt_expires(info.expires, today)),
-        ("Privacy", info.privacy),
-        ("Registrar", info.registrar or "-"),
-        ("DNS", ", ".join(info.nameservers) or "-"),
+        ("Privacy", info.privacy),  # always shown, "unknown" when undecided
+        ("Registrar", info.registrar),
+        ("DNS", ", ".join(info.nameservers)),
     ]
-    lines = [f"{label:<{LABEL_WIDTH}}{value}" for label, value in rows]
+    lines = [f"{label:<{LABEL_WIDTH}}{value}" for label, value in rows if value]
     for m in metrics:
         lines.append(paint(m.label, f"{m.label:<{LABEL_WIDTH}}{m.value} ({m.source})"))
     return lines
 
 
 def render_table(report: Report, paint: Painter) -> list[str]:
-    cells = [(r.domain, r.status, r.price or "-") for r in report.rows]
-    w0 = max([len("Domain"), *(len(c[0]) for c in cells)])
-    w1 = max([len("Status"), *(len(c[1]) for c in cells)])
-    lines = [f"{'Domain':<{w0}}  {'Status':<{w1}}  Price"]
-    for domain, status, price in cells:
-        lines.append(paint(status, f"{domain:<{w0}}  {status:<{w1}}  {price}"))
+    with_price = any(r.price for r in report.rows)
+    w0 = max([len("Domain"), *(len(r.domain) for r in report.rows)])
+    w1 = max([len("Status"), *(len(r.status) for r in report.rows)])
+
+    def row(domain: str, status: str, price: str | None) -> str:
+        if not with_price:
+            return f"{domain:<{w0}}  {status}"
+        return f"{domain:<{w0}}  {status:<{w1}}  {price or '-'}"
+
+    lines = [row("Domain", "Status", "Price")]
+    for r in report.rows:
+        lines.append(paint(r.status, row(r.domain, r.status, r.price)))
     return lines
 
 
-# --- background metrics -----------------------------------------------------------
+# --- best-effort background work ---------------------------------------------------
+
+T = TypeVar("T")
 
 
-class _Background:
-    """Run the metrics fetch on a daemon thread so it can never block exit."""
+class _Background(Generic[T]):
+    """Run a best-effort job on a daemon thread so it can never block exit.
 
-    def __init__(self, fetch: MetricsFetcher, domain: str) -> None:
-        self._result: list[Metric] = []
-        self._thread = threading.Thread(target=self._run, args=(fetch, domain), daemon=True)
-        self._started = time.monotonic()
+    ``result`` waits at most until ``deadline`` (a ``time.monotonic`` value)
+    and returns ``fallback`` on timeout or on any exception.
+    """
+
+    def __init__(self, job: Callable[[], T], fallback: T, deadline: float) -> None:
+        self._result = fallback
+        self._fallback = fallback
+        self._deadline = deadline
+        self._thread = threading.Thread(target=self._run, args=(job,), daemon=True)
         self._thread.start()
 
-    def _run(self, fetch: MetricsFetcher, domain: str) -> None:
+    def _run(self, job: Callable[[], T]) -> None:
         try:
-            self._result = fetch(domain)
-        except Exception:  # noqa: BLE001 - metrics are best-effort by design
-            self._result = []
+            self._result = job()
+        except Exception:  # noqa: BLE001 - best-effort by design
+            self._result = self._fallback
 
-    def result(self) -> list[Metric]:
-        remaining = METRICS_GRACE - (time.monotonic() - self._started)
-        self._thread.join(max(0.0, remaining))
-        return [] if self._thread.is_alive() else list(self._result)
+    def result(self) -> T:
+        self._thread.join(max(0.0, self._deadline - time.monotonic()))
+        return self._fallback if self._thread.is_alive() else self._result
 
 
 # --- main flow -------------------------------------------------------------------------
@@ -189,9 +201,15 @@ def main(argv: Sequence[str], deps: Deps) -> int:
     original: str | None = None
     if isinstance(query, DomainQuery):
         domain = query.domain
+        deadline = time.monotonic() + BACKGROUND_BUDGET
+        fetch_metrics_job = deps.metrics
+        no_metrics: list[Metric] = []
         background = (
-            _Background(deps.metrics, domain) if deps.metrics is not None and not args.no_metrics else None
+            _Background(lambda: fetch_metrics_job(domain), no_metrics, deadline)
+            if fetch_metrics_job is not None and not args.no_metrics
+            else None
         )
+        registry_rdap: dict[str, object] | None = None
         lookup = run_whois(domain, WHOIS_TIMEOUT, deps.whois_runner)
         if args.verbose:
             if lookup.text:
@@ -212,6 +230,7 @@ def main(argv: Sequence[str], deps: Deps) -> int:
                 if args.verbose and rdap_result.raw:
                     out.write(rdap_result.raw + "\n")
                 info = info_from_rdap(rdap_result.data)
+                registry_rdap = rdap_result.data
                 state, reason = "taken", ""
             elif rdap_result.state == "unregistered":
                 state, reason = "available", "RDAP: 404 (no such domain at the registry)"
@@ -220,6 +239,16 @@ def main(argv: Sequence[str], deps: Deps) -> int:
                 state = "unknown"
                 reason = "No registration record found via WHOIS or RDAP" + (f" ({why})." if why else ".")
         if info is not None:
+            if info.privacy == "unknown":
+                # Registries rarely carry registrant data and many registrars have
+                # dropped port 43, so ask the registrar's RDAP server instead.
+                registry_data = registry_rdap
+                privacy_job = _Background(
+                    lambda: rdap.registrar_privacy(domain, registry_data), None, deadline
+                )
+                privacy = privacy_job.result()
+                if privacy is not None:
+                    info = replace(info, privacy=privacy)
             metrics = background.result() if background is not None else []
             out.write(render_header(domain, "taken", paint) + "\n")
             for line in render_info(info, deps.today, metrics, paint):

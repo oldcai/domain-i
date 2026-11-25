@@ -104,6 +104,8 @@ def test_unregistered_com() -> None:
         ("Registrant Name: Data Protected\n", "yes (Data Protected)"),
         ("Registrant Name: GDPR Masked\n", "yes (GDPR Masked)"),
         ("Registrant Name: Not Disclosed\n", "yes (Not Disclosed)"),
+        ("Registrant Organization: c/o whoisproxy.com\n", "yes (c/o whoisproxy.com)"),
+        ("Registrant Organization: Registrant of sourcehut.org\n", "yes (Registrant of sourcehut.org)"),
         ("Registrant Organization: Acme Corp\nRegistrant Name: REDACTED\n", "no (Acme Corp)"),
         ("Registrant Name: Jane Example\n", "no (Jane Example)"),
         ("Registrant Country: US\n", "unknown"),

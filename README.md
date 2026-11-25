@@ -40,7 +40,7 @@ github.com  REGISTERED
 Created    2007-10-09
 Updated    2026-09-07
 Expires    2028-10-09 (683 days left)
-Privacy    unknown
+Privacy    yes (REDACTED FOR PRIVACY)
 Registrar  MarkMonitor Inc.
 DNS        dns1.p08.nsone.net, dns2.p08.nsone.net, ns-1283.awsdns-32.org, ...
 Rank       #34 (tranco)
@@ -49,7 +49,11 @@ Rank       #34 (tranco)
 * Dates are normalised to `YYYY-MM-DD`; `Expires` shows the days left.
 * `Privacy` is `yes (<what matched>)` when the registrant is hidden behind a
   privacy/proxy service or redacted, `no (<organisation>)` when a real holder is
-  published, and `unknown` when the registry publishes no registrant at all.
+  published, and `unknown` when nobody publishes registrant data. When WHOIS
+  cannot decide (thin registries such as `.com`, registrars without port 43),
+  domain-i follows the registry's RDAP `related` link to the registrar's RDAP
+  server and reads the registrant there, in the background.
+* Fields the registry does not publish are omitted (except `Privacy`).
 * Registries without a port-43 WHOIS service (for example `.app`, `.dev`, `.uk`
   on some clients) fall back to [RDAP](https://about.rdap.org/).
 * A domain is only reported as **not registered** on positive evidence (a WHOIS
@@ -62,16 +66,16 @@ Anything like `https://www.Example.com/path` is cleaned to `example.com`.
 ### Availability mode: input without a suffix
 
 ```
-$ domain-i password manager
-Domain                Status     Price
-passwordmanager.com   taken      -
-passwordmanager.net   taken      -
-passwordmanager.org   taken      -
-passwordmanager.app   taken      -
-password-manager.com  taken      -
-password-manager.net  taken      -
-password-manager.org  taken      -
-password-manager.app  available  -
+$ domain-i passwordmanager
+Domain                Status
+passwordmanager.com   taken
+passwordmanager.net   taken
+passwordmanager.org   taken
+passwordmanager.app   taken
+password-manager.com  taken
+password-manager.net  taken
+password-manager.org  taken
+password-manager.app  taken
 
 All plain names are taken, so hyphenated variants were checked too.
 Backend: Spaceship
@@ -82,17 +86,28 @@ Backend: Spaceship
 * The plain name is checked first. Hyphenated variants are checked **only if every
   plain name is confirmed taken**. A single word that cannot be split gets a
   hint to retry with spaces.
-* `Price` is only filled in for premium names that are available (Spaceship
-  backend only).
+* The `Price` column only appears when an available name carries a premium
+  price (Spaceship backend only).
 * Status colours: green `available`, yellow `taken`, dim `unknown`.
 
 ## Configuration
 
-Everything is optional. domain-i reads one `KEY=VALUE` file
-(`export KEY=VALUE` and quoted values are fine):
+Everything is optional. Settings live in `KEY=VALUE` files
+(`export KEY=VALUE`, quotes and `#` comments are fine):
 
-* `$DOMAIN_I_ENV` if set, otherwise
-* `~/.config/domain-i/env` (respects `$XDG_CONFIG_HOME`).
+* every `*.env` file in `~/.config/domain-i/` (respects `$XDG_CONFIG_HOME`),
+  read in file-name order, later files overriding earlier ones; or
+* only the single file named by `$DOMAIN_I_ENV`, when that variable is set.
+
+A convenient layout keeps secrets and preferences apart, e.g. a
+`credentials.env` (possibly a symlink to wherever you keep secrets) and a
+`config.env` for options:
+
+```
+~/.config/domain-i/
+  config.env        # DOMAIN_I_TLDS=com,net,org,app
+  credentials.env   # SPACESHIP_API_KEY=... / SPACESHIP_API_SECRET=... / AHREFS_API_KEY=...
+```
 
 ### Spaceship credentials (optional, gives premium prices)
 
@@ -102,13 +117,7 @@ the *domains:read* scope) all names are checked in one request and premium
 prices are shown. Credentials are read from, in order:
 
 1. environment variables `SPACESHIP_API_KEY` and `SPACESHIP_API_SECRET` (both set);
-2. the config file above, same variable names.
-
-```
-# ~/.config/domain-i/env
-SPACESHIP_API_KEY=...
-SPACESHIP_API_SECRET=...
-```
+2. the config files above, same variable names.
 
 If the Spaceship call fails, domain-i falls back to RDAP and says so under the
 table. To force RDAP for one run: `env -u SPACESHIP_API_KEY DOMAIN_I_ENV=/dev/null domain-i foo`.
@@ -119,7 +128,7 @@ Default: `com,net,org,app`, shown in that order. Override, highest priority firs
 
 1. `--tlds com,io,dev`
 2. environment variable `DOMAIN_I_TLDS="io dev"`
-3. `DOMAIN_I_TLDS=com,io,dev` in the config file
+3. `DOMAIN_I_TLDS=com,io,dev` in a config file (e.g. `config.env`)
 4. the built-in default
 
 Commas or spaces, optional leading dots and any case are accepted (`.COM io`),

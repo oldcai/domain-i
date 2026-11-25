@@ -36,18 +36,23 @@ def test_credentials_from_domain_i_env_file(tmp_path: Path) -> None:
 
 
 def test_credentials_from_default_config_file(tmp_path: Path) -> None:
-    (tmp_path / "env").write_text("export SPACESHIP_API_KEY=k3\nexport SPACESHIP_API_SECRET=s3\n")
+    (tmp_path / "credentials.env").write_text("export SPACESHIP_API_KEY=k3\nexport SPACESHIP_API_SECRET=s3\n")
     assert load_credentials({}, config_dir=tmp_path) == Credentials("k3", "s3")
 
 
 def test_explicit_domain_i_env_overrides_default_file(tmp_path: Path) -> None:
-    (tmp_path / "env").write_text("SPACESHIP_API_KEY=k3\nSPACESHIP_API_SECRET=s3\n")
+    (tmp_path / "credentials.env").write_text("SPACESHIP_API_KEY=k3\nSPACESHIP_API_SECRET=s3\n")
     assert load_credentials({"DOMAIN_I_ENV": "/dev/null"}, config_dir=tmp_path) is None
 
 
 def test_partial_environment_falls_through(tmp_path: Path) -> None:
-    (tmp_path / "env").write_text("SPACESHIP_API_KEY=k3\nSPACESHIP_API_SECRET=s3\n")
+    (tmp_path / "credentials.env").write_text("SPACESHIP_API_KEY=k3\nSPACESHIP_API_SECRET=s3\n")
     assert load_credentials({"SPACESHIP_API_SECRET": "s"}, config_dir=tmp_path) == Credentials("k3", "s3")
+
+
+def test_files_without_env_suffix_are_ignored(tmp_path: Path) -> None:
+    (tmp_path / "env").write_text("SPACESHIP_API_KEY=k3\nSPACESHIP_API_SECRET=s3\n")
+    assert load_credentials({}, config_dir=tmp_path) is None
 
 
 def test_no_credentials(tmp_path: Path) -> None:

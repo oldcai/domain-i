@@ -6,7 +6,7 @@ from pathlib import Path
 from conftest import rdap_fixture
 from fakes import FakeHttp
 from domain_i.http import NetworkError, Response
-from domain_i.rdap import BOOTSTRAP_URL, Rdap, info_from_rdap
+from domain_i.rdap import BOOTSTRAP_URL, Rdap, info_from_rdap, related_url
 
 DNS_JSON = rdap_fixture("dns.json")
 
@@ -121,3 +121,69 @@ def test_info_from_rdap_registrant_privacy() -> None:
     assert info_from_rdap(org).privacy == "no (Acme Corp)"
     rfc9537 = {"redacted": [{"name": {"type": "Registrant Name"}}]}
     assert info_from_rdap(rfc9537).privacy == "yes (Registrant Name redacted)"
+
+
+# --- registrar RDAP (privacy) ---------------------------------------------------------
+
+VERISIGN = "https://rdap.verisign.com/com/v1/domain/"
+
+
+def test_related_url_from_registry_response() -> None:
+    data = json.loads(rdap_fixture("google.com.json"))
+    assert related_url(data) == "https://rdap.markmonitor.com/rdap/domain/GOOGLE.COM"
+    assert related_url({"links": [{"rel": "self", "href": "x"}]}) is None
+
+
+def test_registrar_rdap_redacted_registrant() -> None:
+    info = info_from_rdap(json.loads(rdap_fixture("registrar_google.com.json")))
+    assert info.privacy == "yes (REDACTED FOR PRIVACY)"
+
+
+def test_registrar_rdap_privacy_service() -> None:
+    info = info_from_rdap(json.loads(rdap_fixture("registrar_spaceship.com.json")))
+    assert info.privacy == "yes (Privacy service provided by WITHHELD FOR PRIVACY LLC)"
+
+
+def test_registrar_rdap_disclosed_org() -> None:
+    info = info_from_rdap(json.loads(rdap_fixture("registrar_ycombinator.com.json")))
+    assert info.privacy == "no (Y Combinator)"
+
+
+def test_registrar_privacy_follows_related_link(tmp_path: Path) -> None:
+    http = FakeHttp(
+        {
+            VERISIGN + "spaceship.com": Response(200, rdap_fixture("spaceship.com.json")),
+            "https://rdap.spaceship.com/domain/SPACESHIP.COM": Response(200, rdap_fixture("registrar_spaceship.com.json")),
+        }
+    )
+    assert make(http, tmp_path).registrar_privacy("spaceship.com") == (
+        "yes (Privacy service provided by WITHHELD FOR PRIVACY LLC)"
+    )
+
+
+def test_registrar_privacy_reuses_registry_data(tmp_path: Path) -> None:
+    http = FakeHttp(
+        {"https://rdap.markmonitor.com/rdap/domain/GOOGLE.COM": Response(200, rdap_fixture("registrar_google.com.json"))}
+    )
+    registry = json.loads(rdap_fixture("google.com.json"))
+    assert make(http, tmp_path).registrar_privacy("google.com", registry) == "yes (REDACTED FOR PRIVACY)"
+    assert http.urls() == ["https://rdap.markmonitor.com/rdap/domain/GOOGLE.COM"]
+
+
+def test_registrar_privacy_failures_return_none(tmp_path: Path) -> None:
+    no_link = FakeHttp({VERISIGN + "a.com": Response(200, b'{"links": []}')})
+    assert make(no_link, tmp_path).registrar_privacy("a.com") is None
+    down = FakeHttp(
+        {
+            VERISIGN + "google.com": Response(200, rdap_fixture("google.com.json")),
+            "https://rdap.markmonitor.com/rdap/domain/GOOGLE.COM": NetworkError("timeout"),
+        }
+    )
+    assert make(down, tmp_path).registrar_privacy("google.com") is None
+    unknown = FakeHttp(
+        {
+            VERISIGN + "google.com": Response(200, rdap_fixture("google.com.json")),
+            "https://rdap.markmonitor.com/rdap/domain/GOOGLE.COM": Response(200, b'{"entities": []}'),
+        }
+    )
+    assert make(unknown, tmp_path).registrar_privacy("google.com") is None

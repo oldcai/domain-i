@@ -115,6 +115,44 @@ class Rdap:
         return RdapResult("registered", data, raw, None)
 
 
+    def registrar_privacy(self, domain: str, registry: Mapping[str, object] | None = None) -> str | None:
+        """Privacy verdict from the registrar's RDAP record, or None if it cannot be decided.
+
+        ``registry`` is the registry RDAP response when the caller already has it.
+        """
+        if registry is None:
+            result = self.lookup(domain)
+            if result.data is None:
+                return None
+            registry = result.data
+        url = related_url(registry)
+        if url is None:
+            return None
+        try:
+            resp = self._http.request("GET", url, headers={"Accept": ACCEPT}, timeout=self._timeout)
+        except NetworkError:
+            return None
+        if resp.status != 200:
+            return None
+        try:
+            data = as_dict(parse_json(resp.body))
+        except (ValueError, UnicodeDecodeError):
+            return None
+        privacy = info_from_rdap(data).privacy
+        return None if privacy == "unknown" else privacy
+
+
+def related_url(data: Mapping[str, object]) -> str | None:
+    """The registrar's RDAP URL advertised by a registry response (``rel: related``)."""
+    for link in as_list(data.get("links")):
+        item = as_dict(link)
+        href = as_str(item.get("href")) or ""
+        kind = (as_str(item.get("type")) or "application/rdap+json").lower()
+        if item.get("rel") == "related" and href.startswith(("https://", "http://")) and "json" in kind:
+            return href
+    return None
+
+
 def _bootstrap_table(body: bytes | None) -> dict[str, str]:
     if not body:
         return {}

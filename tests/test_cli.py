@@ -95,6 +95,10 @@ def no_spaceship_rdap(states: dict[str, int]) -> dict[str, Response | Exception]
 
 def test_query_registered_domain_summary(tmp_path: Path) -> None:
     h = Harness(tmp_path, whois={"google.com": whois_fixture("google.com")})
+    h.http.routes[VERISIGN + "google.com"] = Response(200, rdap_fixture("google.com.json"))
+    h.http.routes["https://rdap.markmonitor.com/rdap/domain/GOOGLE.COM"] = Response(
+        200, rdap_fixture("registrar_google.com.json")
+    )
     assert h.run("https://www.Google.com/") == 0
     days = (date(2028, 9, 14) - TODAY).days
     assert h.out == (
@@ -102,11 +106,35 @@ def test_query_registered_domain_summary(tmp_path: Path) -> None:
         "Created    1997-09-15\n"
         "Updated    2019-09-09\n"
         f"Expires    2028-09-14 ({days} days left)\n"
-        "Privacy    unknown\n"
+        "Privacy    yes (REDACTED FOR PRIVACY)\n"
         "Registrar  MarkMonitor Inc.\n"
         "DNS        ns1.google.com, ns2.google.com, ns3.google.com, ns4.google.com\n"
     )
+
+
+def test_privacy_lookup_failure_keeps_unknown(tmp_path: Path) -> None:
+    h = Harness(tmp_path, whois={"google.com": whois_fixture("google.com")})
+    h.http.routes["*"] = NetworkError("offline")
+    assert h.run("google.com") == 0
+    assert "Privacy    unknown\n" in h.out
+
+
+def test_privacy_lookup_skipped_when_whois_decides(tmp_path: Path) -> None:
+    h = Harness(tmp_path, whois={"google.io": whois_fixture("google.io")})
+    assert h.run("google.io") == 0
+    assert "Privacy    no (Google LLC)\n" in h.out
     assert h.http.calls == []
+
+
+def test_app_privacy_follows_registrar_link_from_registry_rdap(tmp_path: Path) -> None:
+    h = Harness(tmp_path, whois={"cash.app": whois_fixture("cash.app")})
+    h.http.routes[GOOGLE_RDAP + "cash.app"] = Response(200, rdap_fixture("cash.app.json"))
+    h.http.routes["https://rdap.cscglobal.com/dbs/rdap-api/v1/domain/cash.app"] = Response(
+        200, rdap_fixture("registrar_spaceship.com.json")
+    )
+    assert h.run("cash.app") == 0
+    assert "Privacy    yes (Privacy service provided by WITHHELD FOR PRIVACY LLC)\n" in h.out
+    assert h.http.urls().count(GOOGLE_RDAP + "cash.app") == 1
 
 
 def test_verbose_prints_raw_whois_first(tmp_path: Path) -> None:
@@ -117,12 +145,15 @@ def test_verbose_prints_raw_whois_first(tmp_path: Path) -> None:
     assert h.out.rstrip().endswith("ns4.google.com")
 
 
-def test_missing_fields_show_dash(tmp_path: Path) -> None:
+def test_missing_fields_are_hidden_but_privacy_stays(tmp_path: Path) -> None:
     h = Harness(tmp_path, whois={"google.de": whois_fixture("google.de")})
     assert h.run("google.de") == 0
-    assert "Created    -\n" in h.out
-    assert "Registrar  -\n" in h.out
-    assert "Expires    -\n" in h.out
+    assert h.out == (
+        "google.de  REGISTERED\n"
+        "Updated    2018-03-12\n"
+        "Privacy    unknown\n"
+        "DNS        ns1.google.com, ns2.google.com, ns3.google.com, ns4.google.com\n"
+    )
 
 
 def test_app_falls_back_to_rdap(tmp_path: Path) -> None:
@@ -206,6 +237,17 @@ def test_name_mode_with_spaceship(tmp_path: Path) -> None:
     assert h.whois_calls == []
 
 
+def test_price_column_hidden_without_premium(tmp_path: Path) -> None:
+    h = Harness(tmp_path)
+    h.http.routes.update(no_spaceship_rdap({"foobar.com": 200, "foobar.net": 404, "foobar.org": 404, "foobar.app": 404}))
+    assert h.run("foobar") == 0
+    assert h.out.splitlines()[:3] == [
+        "Domain      Status",
+        "foobar.com  taken",
+        "foobar.net  available",
+    ]
+
+
 def test_name_mode_all_taken_then_hyphen(tmp_path: Path) -> None:
     states = {f"passwordmanager.{t}": 200 for t in ("com", "net", "org", "app")}
     states |= {f"password-manager.{t}": 404 for t in ("com", "net", "org", "app")}
@@ -236,7 +278,7 @@ def test_tld_flag_and_env(tmp_path: Path) -> None:
 
 def test_tlds_from_config_file(tmp_path: Path) -> None:
     (tmp_path / "config").mkdir()
-    (tmp_path / "config" / "env").write_text("DOMAIN_I_TLDS=dev\n")
+    (tmp_path / "config" / "config.env").write_text("DOMAIN_I_TLDS=dev\n")
     h = Harness(tmp_path)
     h.http.routes.update(no_spaceship_rdap({"foobar.dev": 404}))
     assert h.run("foobar") == 0

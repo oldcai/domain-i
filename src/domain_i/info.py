@@ -31,6 +31,8 @@ PRIVACY_MARKERS: tuple[str, ...] = (
     "statutory masking",
     "non-public data",
     "please query the rdds",
+    "whoistrustee",
+    "registrant of ",
     "redacted",
     "proxy",
 )

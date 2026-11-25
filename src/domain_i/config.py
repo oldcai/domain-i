@@ -26,17 +26,26 @@ def parse_env_file(text: str) -> dict[str, str]:
     return values
 
 
-def config_file(environ: Mapping[str, str], config_dir: Path) -> Path:
+def config_files(environ: Mapping[str, str], config_dir: Path) -> list[Path]:
+    """``$DOMAIN_I_ENV`` alone if set, else every ``*.env`` in ``config_dir`` by name."""
     explicit = environ.get("DOMAIN_I_ENV")
-    return Path(os.path.expanduser(explicit)) if explicit else config_dir / "env"
+    if explicit:
+        return [Path(os.path.expanduser(explicit))]
+    try:
+        return sorted(p for p in config_dir.glob("*.env") if p.is_file())
+    except OSError:
+        return []
 
 
 def read_config(environ: Mapping[str, str], config_dir: Path) -> dict[str, str]:
-    """Read ``$DOMAIN_I_ENV`` if set, else ``<config_dir>/env``; missing file means empty."""
-    try:
-        return parse_env_file(config_file(environ, config_dir).read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError):
-        return {}
+    """Merge the config files; later files (by name) override earlier ones."""
+    merged: dict[str, str] = {}
+    for path in config_files(environ, config_dir):
+        try:
+            merged.update(parse_env_file(path.read_text(encoding="utf-8")))
+        except (OSError, UnicodeDecodeError):
+            continue
+    return merged
 
 
 def default_config_dir(environ: Mapping[str, str]) -> Path:
