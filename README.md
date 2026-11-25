@@ -28,7 +28,7 @@ domain-i [-v] [--no-metrics] [--color] [--tlds LIST] <domain | name | words...>
 | `-v`, `--verbose` | print the raw WHOIS output (and RDAP JSON when RDAP was used) before the summary |
 | `--no-metrics` | skip the Rank / DR lookups for registered domains |
 | `--color` | force coloured output (also `FORCE_COLOR=1`) |
-| `--tlds com,io,dev` | TLDs to check in availability mode, for this run only |
+| `--tlds com,io,dev` | TLDs for the availability table, for this run only |
 
 Exit codes: `0` normal, `2` bad arguments, `1` when every network lookup failed.
 

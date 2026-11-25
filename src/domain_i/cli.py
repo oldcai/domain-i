@@ -94,7 +94,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-v", "--verbose", action="store_true", help="print raw WHOIS / RDAP output first")
     parser.add_argument("--no-metrics", action="store_true", help="skip the Traffic/DR/Rank lookups for registered domains")
     parser.add_argument("--color", action="store_true", help="force coloured output")
-    parser.add_argument("--tlds", metavar="LIST", help="TLDs to check in availability mode, e.g. com,io,dev")
+    parser.add_argument("--tlds", metavar="LIST", help="TLDs for the availability table, e.g. com,io,dev")
     return parser
 
 
