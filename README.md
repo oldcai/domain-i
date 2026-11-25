@@ -97,14 +97,33 @@ Taken: 4/4
 
 All plain names are taken, so hyphenated variants were checked too.
 Backend: Spaceship
+
+$ domain-i teleprompter web
+Domain                Status
+teleprompterweb.com   taken
+teleprompterweb.net   available
+teleprompterweb.org   available
+teleprompterweb.app   available
+teleprompter-web.com  taken
+Taken: 1/4
+
+teleprompterweb.com is taken, so teleprompter-web.com was checked too.
+Backend: Spaceship
 ```
 
 * Words come from spaces or hyphens (`foo bar`, `foo-bar`); a single word is
   split with wordninja (`foobar` -> `foo bar`).
-* The plain name is checked first. Hyphenated variants are checked **only if every
-  plain name is confirmed taken**. `Taken: n/m` counts the plain name in the
-  configured TLDs (`(k unknown)` is added when some could not be checked). A single word that cannot be split gets a
-  hint to retry with spaces.
+* The plain name is checked first in every configured TLD. The **primary TLD**
+  is the first one in the list (`.com` with the default `com,net,org,app`;
+  `io` for `--tlds io,com`). Hyphenated names are then checked like this:
+  * every plain name confirmed taken -> the hyphenated name in every TLD;
+  * otherwise, if the plain name in the primary TLD is confirmed taken -> the
+    hyphenated name in the primary TLD only (e.g. `password-manager.com`);
+  * otherwise (primary TLD available or unknown) -> no hyphenated names.
+
+  A single word that cannot be split gets a hint to retry with spaces instead.
+  `Taken: n/m` counts only the plain name in the configured TLDs (`(k unknown)`
+  is added when some could not be checked).
 * The `Price` column only appears when an available name carries a premium
   price (Spaceship backend only).
 * Status colours: green `available`, yellow `taken`, dim `unknown`. Metric

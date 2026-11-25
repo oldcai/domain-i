@@ -165,8 +165,8 @@ def render_report(report: Report, paint: Painter, out: TextIO) -> None:
     for line in render_table(report, paint):
         out.write(line + "\n")
     out.write("\n")
-    if report.hyphen_checked:
-        out.write("All plain names are taken, so hyphenated variants were checked too.\n")
+    if report.note:
+        out.write(report.note + "\n")
     if report.hint:
         out.write(report.hint + "\n")
     out.write(f"Backend: {', '.join(report.backends)}\n")

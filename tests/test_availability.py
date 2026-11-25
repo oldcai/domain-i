@@ -43,21 +43,38 @@ def test_all_plain_taken_checks_hyphen_variants() -> None:
     assert report.hint is None
 
 
-def test_one_available_stops_before_hyphen() -> None:
-    statuses = taken("foobar") | {"foobar.app": "available"}
+def test_primary_taken_others_free_checks_only_hyphenated_primary() -> None:
+    statuses = taken("foobar") | {"foobar.app": "available", "foo-bar.com": "available"}
     checker = FakeChecker(statuses)
     report = run_availability(("foo", "bar"), ALL, None, checker)
-    assert len(checker.batches) == 1
-    assert len(report.rows) == 4
+    assert checker.batches[1] == ["foo-bar.com"]
+    assert [r.domain for r in report.rows][4:] == ["foo-bar.com"]
+    assert report.note == "foobar.com is taken, so foo-bar.com was checked too."
+    assert report.hint is None
 
 
-def test_unknown_stops_before_hyphen() -> None:
+def test_unknown_elsewhere_with_primary_taken_checks_hyphenated_primary() -> None:
     statuses = taken("foobar")
     statuses["foobar.org"] = "unknown"
     checker = FakeChecker(statuses)
     report = run_availability(("foo", "bar"), ALL, None, checker)
+    assert checker.batches[1] == ["foo-bar.com"]
+    assert [r.status for r in report.rows][:4] == ["taken", "taken", "unknown", "taken"]
+
+
+@pytest.mark.parametrize("primary", ["unknown", "available"])
+def test_primary_not_confirmed_taken_checks_no_hyphen(primary: str) -> None:
+    checker = FakeChecker(taken("foobar") | {"foobar.com": primary})
+    report = run_availability(("foo", "bar"), ALL, None, checker)
     assert len(checker.batches) == 1
-    assert [r.status for r in report.rows] == ["taken", "taken", "unknown", "taken"]
+    assert report.note is None and report.hint is None
+
+
+def test_all_taken_note_unchanged() -> None:
+    checker = FakeChecker(taken("foobar"))
+    report = run_availability(("foo", "bar"), ALL, None, checker)
+    assert report.note == "All plain names are taken, so hyphenated variants were checked too."
+    assert report.hyphen_checked
 
 
 def test_unsplittable_word_gets_hint() -> None:
@@ -65,6 +82,21 @@ def test_unsplittable_word_gets_hint() -> None:
     report = run_availability(("google",), ALL, None, checker)
     assert len(checker.batches) == 1
     assert report.hint is not None and "space" in report.hint
+
+
+def test_unsplittable_word_gets_hint_when_only_primary_taken() -> None:
+    checker = FakeChecker(taken("google") | {"google.app": "available"})
+    report = run_availability(("google",), ALL, None, checker)
+    assert len(checker.batches) == 1
+    assert report.note is None
+    assert report.hint is not None and "space" in report.hint
+
+
+def test_hyphenated_original_is_not_checked_twice() -> None:
+    checker = FakeChecker(taken("foobar") | {"foobar.app": "available", "foo-bar.com": "taken"})
+    report = run_availability(("foo", "bar"), ALL, "foo-bar.com", checker)
+    assert len(checker.batches) == 1
+    assert [r.domain for r in report.rows] == ["foo-bar.com", *[f"foobar.{t}" for t in ALL]]
 
 
 def test_original_domain_is_first_row_and_not_duplicated() -> None:
@@ -110,7 +142,10 @@ def test_custom_tld_list_controls_hyphen_trigger() -> None:
     assert len(report.rows) == 4
     checker2 = FakeChecker({"foobar.io": "taken", "foobar.dev": "available"})
     run_availability(("foo", "bar"), tlds, None, checker2)
-    assert len(checker2.batches) == 1
+    assert checker2.batches[1] == ["foo-bar.io"]  # the first configured TLD is the primary one
+    checker3 = FakeChecker({"foobar.io": "available", "foobar.dev": "taken"})
+    run_availability(("foo", "bar"), tlds, None, checker3)
+    assert len(checker3.batches) == 1
 
 
 # --- backend selection ---------------------------------------------------

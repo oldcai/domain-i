@@ -38,6 +38,7 @@ class Report:
     backends: list[str]
     hyphen_checked: bool
     hint: str | None
+    note: str | None = None  # why hyphenated names were checked
     taken: int = 0  # among the configured plain names only
     total: int = 0
     unknown: int = 0
@@ -139,7 +140,11 @@ def run_availability(
     known: Mapping[str, str] | None = None,
     first: CheckResult | None = None,
 ) -> Report:
-    """Check the plain name, then hyphenated variants only if every plain name is taken.
+    """Check the plain name, then maybe hyphenated variants.
+
+    Every plain name taken -> the hyphenated name in every TLD. Otherwise, if the
+    plain name in the primary (first configured) TLD is taken -> the hyphenated
+    name in that TLD only. Otherwise no hyphenated names.
 
     ``known`` pins statuses already established elsewhere (the WHOIS/RDAP lookup of
     ``original``); ``first`` is a result for ``first_batch`` started earlier.
@@ -158,12 +163,13 @@ def run_availability(
     backends = [result.backend]
     plain_rows = [r for r in rows if r.domain in plain_domains]
 
-    def report(hyphen_checked: bool, hint: str | None) -> Report:
+    def report(hyphen_checked: bool, hint: str | None, note: str | None) -> Report:
         return Report(
             rows,
             backends,
             hyphen_checked,
             hint,
+            note=note,
             taken=sum(r.status == "taken" for r in plain_rows),
             total=len(plain_rows),
             unknown=sum(r.status == "unknown" for r in plain_rows),
@@ -171,17 +177,29 @@ def run_availability(
             backend_failed=backend_failed,
         )
 
-    if not (plain_rows and all(r.status == "taken" for r in plain_rows)):
-        return report(False, None)
+    primary = plain_domains[0] if plain_domains else None
+    status = {r.domain: r.status for r in rows}
+    note: str | None
+    if plain_rows and all(r.status == "taken" for r in plain_rows):
+        targets = list(tlds)
+        note = "All plain names are taken, so hyphenated variants were checked too."
+    elif primary is not None and status.get(primary) == "taken":
+        targets = [tlds[0]]
+        note = f"{primary} is taken, so {hyphen}.{tlds[0]} was checked too." if hyphen else None
+    else:
+        return report(False, None, None)
     if hyphen is None:
         return report(
             False,
             f"No hyphenated variant: '{plain}' could not be split into words. "
             f"Retry with spaces to choose the split, e.g. domain-i {plain[: len(plain) // 2]} {plain[len(plain) // 2 :]}",
+            None,
         )
     seen = {r.domain for r in rows}
-    second = checker([d for d in (f"{hyphen}.{t}" for t in tlds) if d not in seen])
-    rows.extend(second.rows)
-    if second.backend not in backends:
-        backends.append(second.backend)
-    return report(True, None)
+    wanted = [d for d in (f"{hyphen}.{t}" for t in targets) if d not in seen]
+    if wanted:
+        second = checker(wanted)
+        rows.extend(second.rows)
+        if second.backend not in backends:
+            backends.append(second.backend)
+    return report(True, None, note)

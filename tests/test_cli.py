@@ -248,42 +248,44 @@ def test_no_record_anywhere_is_unknown_then_availability(tmp_path: Path) -> None
 
 
 def test_name_mode_with_spaceship(tmp_path: Path) -> None:
-    h = Harness(tmp_path, environ={"SPACESHIP_API_KEY": "k", "SPACESHIP_API_SECRET": "s"})
-    body = {
-        "domains": [
-            {"domain": "foobar.com", "result": "taken", "premiumPricing": []},
-            {"domain": "foobar.net", "result": "taken", "premiumPricing": []},
-            {"domain": "foobar.org", "result": "taken", "premiumPricing": []},
-            {
-                "domain": "foobar.app",
-                "result": "available",
-                "premiumPricing": [{"operation": "register", "price": 1200, "currency": "usd"}],
-            },
+    h = Harness(tmp_path, environ=dict(CREDS))
+    premium = {"foobar.app": [{"operation": "register", "price": 1200, "currency": "usd"}]}
+    statuses = {"foobar.com": "taken", "foobar.net": "taken", "foobar.org": "taken", "foobar.app": "available"}
+
+    def answer(call: Call) -> Response:
+        asked = json.loads(call.body or b"{}")["domains"]
+        items = [
+            {"domain": d, "result": statuses.get(d, "available"), "premiumPricing": premium.get(d, [])} for d in asked
         ]
-    }
-    h.http.routes[SPACESHIP_URL] = Response(200, json.dumps(body).encode())
+        return Response(200, json.dumps({"domains": items}).encode())
+
+    h.http.routes[SPACESHIP_URL] = answer
     assert h.run("foobar") == 0
     assert h.out == (
-        "Domain      Status     Price\n"
-        "foobar.com  taken      -\n"
-        "foobar.net  taken      -\n"
-        "foobar.org  taken      -\n"
-        "foobar.app  available  1200.00 USD\n"
+        "Domain       Status     Price\n"
+        "foobar.com   taken      -\n"
+        "foobar.net   taken      -\n"
+        "foobar.org   taken      -\n"
+        "foobar.app   available  1200.00 USD\n"
+        "foo-bar.com  available  -\n"
         "Taken: 3/4\n"
         "\n"
+        "foobar.com is taken, so foo-bar.com was checked too.\n"
         "Backend: Spaceship\n"
     )
     assert h.whois_calls == []
+    assert h.command_calls == []
 
 
 def test_price_column_hidden_without_premium(tmp_path: Path) -> None:
     h = Harness(tmp_path)
     h.http.routes.update(no_spaceship_rdap({"foobar.com": 200, "foobar.net": 404, "foobar.org": 404, "foobar.app": 404}))
+    h.http.routes[VERISIGN + "foo-bar.com"] = Response(404, b"")
     assert h.run("foobar") == 0
     assert h.out.splitlines()[:3] == [
-        "Domain      Status",
-        "foobar.com  taken",
-        "foobar.net  available",
+        "Domain       Status",
+        "foobar.com   taken",
+        "foobar.net   available",
     ]
 
 
@@ -353,6 +355,7 @@ def test_argument_errors_exit_2(tmp_path: Path, args: list[str]) -> None:
 def _availability_harness(tmp_path: Path, **kw: object) -> Harness:
     h = Harness(tmp_path, **kw)  # type: ignore[arg-type]
     h.http.routes.update(no_spaceship_rdap({"foobar.com": 200, "foobar.net": 404, "foobar.org": 500, "foobar.app": 404}))
+    h.http.routes[VERISIGN + "foo-bar.com"] = Response(404, b"")
     return h
 
 
@@ -387,7 +390,7 @@ def test_each_status_has_its_own_colour_and_alignment_survives(tmp_path: Path) -
     by_status = {}
     for line in coloured.out.splitlines():
         stripped = ANSI.sub("", line).split()
-        if len(stripped) >= 2 and stripped[0].startswith("foobar."):
+        if ANSI.match(line) and len(stripped) >= 2 and stripped[0].startswith(("foobar.", "foo-bar.")):
             by_status[stripped[1]] = ANSI.findall(line)[0]
     assert set(by_status) == {"taken", "available", "unknown"}
     assert len(set(by_status.values())) == 3
@@ -724,3 +727,30 @@ def test_no_metrics_skips_every_command(tmp_path: Path) -> None:
     h = _registered(tmp_path, environ={"DOMAIN_I_METRICS_CMD": "a", "DOMAIN_I_METRICS_CMD_DR": "b"})
     h.run("--no-metrics", "google.io")
     assert h.command_calls == []
+
+
+def test_custom_tld_list_primary_hyphen_in_cli(tmp_path: Path) -> None:
+    h = Harness(tmp_path, environ=dict(CREDS))
+    h.http.routes[SPACESHIP_URL] = spaceship_answers({"foobar.io": "taken"}, default="available")
+    assert h.run("--tlds", "io,com", "foobar") == 0
+    assert [r.split()[0] for r in table_rows(h.out)] == ["foobar.io", "foobar.com", "foo-bar.io"]
+    assert "foobar.io is taken, so foo-bar.io was checked too.\n" in h.out
+
+
+def test_unsplittable_name_with_taken_primary_gets_hint(tmp_path: Path) -> None:
+    h = Harness(tmp_path, environ=dict(CREDS))
+    h.http.routes[SPACESHIP_URL] = spaceship_answers({"google.app": "available"})
+    assert h.run("google") == 0
+    assert "No hyphenated variant" in h.out
+    assert "was checked too" not in h.out
+
+
+def test_availability_table_never_runs_metrics_commands(tmp_path: Path) -> None:
+    h = Harness(tmp_path, environ=dict(CREDS) | {"DOMAIN_I_METRICS_CMD": "m"})
+    h.http.routes[SPACESHIP_URL] = spaceship_answers({})
+    h.run("foobar")
+    name = "xq7zvkpl3qwmnotreal"
+    h2 = Harness(tmp_path, whois={f"{name}.com": whois_fixture("unregistered.com")}, environ=dict(CREDS) | {"DOMAIN_I_METRICS_CMD": "m"})
+    h2.http.routes[SPACESHIP_URL] = spaceship_answers({}, default="available")
+    h2.run(f"{name}.com")
+    assert h.command_calls == [] and h2.command_calls == []
