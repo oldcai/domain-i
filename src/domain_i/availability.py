@@ -38,6 +38,11 @@ class Report:
     backends: list[str]
     hyphen_checked: bool
     hint: str | None
+    taken: int = 0  # among the configured plain names only
+    total: int = 0
+    unknown: int = 0
+    queried: str | None = None  # the looked-up domain, marked in the table
+    backend_failed: bool = False  # the backend could not answer for any row
 
 
 Checker = Callable[[list[str]], CheckResult]
@@ -115,31 +120,68 @@ def check_domains(domains: list[str], spaceship: SpaceshipCheck | None, rdap: Rd
 # --- flow ------------------------------------------------------------------------
 
 
+def first_batch(words: tuple[str, ...], tlds: tuple[str, ...], original: str | None) -> list[str]:
+    """Domains of the first check: the plain name in each TLD (configured order),
+    with the looked-up domain prepended when it is not one of them."""
+    plain, _ = variants(words)
+    plain_domains = [f"{plain}.{t}" for t in tlds]
+    if original and original not in plain_domains:
+        return [original, *plain_domains]
+    return plain_domains
+
+
 def run_availability(
     words: tuple[str, ...],
     tlds: tuple[str, ...],
     original: str | None,
     checker: Checker,
+    *,
+    known: Mapping[str, str] | None = None,
+    first: CheckResult | None = None,
 ) -> Report:
+    """Check the plain name, then hyphenated variants only if every plain name is taken.
+
+    ``known`` pins statuses already established elsewhere (the WHOIS/RDAP lookup of
+    ``original``); ``first`` is a result for ``first_batch`` started earlier.
+    """
     plain, hyphen = variants(words)
     plain_domains = [f"{plain}.{t}" for t in tlds]
-    first = [original] if original else []
-    result = checker(first + [d for d in plain_domains if d != original])
-    rows = list(result.rows)
+    result = first if first is not None else checker(first_batch(words, tlds, original))
+    backend_failed = bool(result.rows) and all(r.status == "unknown" for r in result.rows)
+    pinned = known or {}
+    rows = [
+        Row(r.domain, pinned[r.domain], r.price if pinned[r.domain] == "available" else None)
+        if r.domain in pinned
+        else r
+        for r in result.rows
+    ]
     backends = [result.backend]
     plain_rows = [r for r in rows if r.domain in plain_domains]
-    all_taken = bool(plain_rows) and all(r.status == "taken" for r in plain_rows)
-    if not all_taken:
-        return Report(rows, backends, False, None)
-    if hyphen is None:
-        hint = (
-            f"No hyphenated variant: '{plain}' could not be split into words. "
-            f"Retry with spaces to choose the split, e.g. domain-i {plain[: len(plain) // 2]} {plain[len(plain) // 2 :]}"
+
+    def report(hyphen_checked: bool, hint: str | None) -> Report:
+        return Report(
+            rows,
+            backends,
+            hyphen_checked,
+            hint,
+            taken=sum(r.status == "taken" for r in plain_rows),
+            total=len(plain_rows),
+            unknown=sum(r.status == "unknown" for r in plain_rows),
+            queried=original,
+            backend_failed=backend_failed,
         )
-        return Report(rows, backends, False, hint)
+
+    if not (plain_rows and all(r.status == "taken" for r in plain_rows)):
+        return report(False, None)
+    if hyphen is None:
+        return report(
+            False,
+            f"No hyphenated variant: '{plain}' could not be split into words. "
+            f"Retry with spaces to choose the split, e.g. domain-i {plain[: len(plain) // 2]} {plain[len(plain) // 2 :]}",
+        )
     seen = {r.domain for r in rows}
     second = checker([d for d in (f"{hyphen}.{t}" for t in tlds) if d not in seen])
     rows.extend(second.rows)
     if second.backend not in backends:
         backends.append(second.backend)
-    return Report(rows, backends, True, None)
+    return report(True, None)

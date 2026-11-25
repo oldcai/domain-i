@@ -4,6 +4,7 @@ import io
 import json
 import re
 import subprocess
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
@@ -12,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from conftest import FIXTURES, rdap_fixture, whois_fixture
-from fakes import FakeHttp
+from fakes import Call, FakeHttp
 from domain_i.cli import Deps, main
 from domain_i.http import NetworkError, Response
 from domain_i.metrics import Metric
@@ -40,12 +41,15 @@ class Harness:
     command_output: str | Exception = "{}"
     command_calls: list[list[str]] = field(default_factory=list)
     whois_calls: list[str] = field(default_factory=list)
+    whois_override: Callable[[list[str], float], str] | None = None
     stdout: io.StringIO = field(default_factory=io.StringIO)
     stderr: io.StringIO = field(default_factory=io.StringIO)
 
     def run(self, *args: str) -> int:
         def runner(argv: list[str], timeout: float) -> str:
             self.whois_calls.append(argv[-1])
+            if self.whois_override is not None:
+                return self.whois_override(argv, timeout)
             if argv[-1] not in self.whois:
                 raise FileNotFoundError("whois")
             return self.whois[argv[-1]]
@@ -82,10 +86,30 @@ def table_rows(out: str) -> list[str]:
     start = next(i for i, line in enumerate(lines) if line.startswith("Domain "))
     rows = []
     for line in lines[start + 1 :]:
-        if not line.strip():
+        if not line.strip() or line.startswith("Taken:"):
             break
         rows.append(line)
     return rows
+
+
+def summary_lines(out: str) -> list[str]:
+    """The lookup summary: everything before the first blank line."""
+    lines = out.splitlines()
+    return lines[: lines.index("")] if "" in lines else lines
+
+
+def spaceship_answers(statuses: dict[str, str], default: str = "taken") -> Callable[[Call], Response]:
+    """A Spaceship route that answers for whatever domains were asked."""
+
+    def answer(call: Call) -> Response:
+        asked = json.loads(call.body or b"{}")["domains"]
+        items = [{"domain": d, "result": statuses.get(d, default), "premiumPricing": []} for d in asked]
+        return Response(200, json.dumps({"domains": items}).encode())
+
+    return answer
+
+
+CREDS = {"SPACESHIP_API_KEY": "k", "SPACESHIP_API_SECRET": "s"}
 
 
 def no_spaceship_rdap(states: dict[str, int]) -> dict[str, Response | Exception]:
@@ -111,15 +135,15 @@ def test_query_registered_domain_summary(tmp_path: Path) -> None:
     )
     assert h.run("https://www.Google.com/") == 0
     days = (date(2028, 9, 14) - TODAY).days
-    assert h.out == (
-        "google.com  REGISTERED\n"
-        "Created    1997-09-15\n"
-        "Updated    2019-09-09\n"
-        f"Expires    2028-09-14 ({days} days left)\n"
-        "Privacy    yes (REDACTED FOR PRIVACY)\n"
-        "Registrar  MarkMonitor Inc.\n"
-        "DNS        ns1.google.com, ns2.google.com, ns3.google.com, ns4.google.com\n"
-    )
+    assert summary_lines(h.out) == [
+        "google.com  REGISTERED",
+        "Created    1997-09-15",
+        "Updated    2019-09-09",
+        f"Expires    2028-09-14 ({days} days left)",
+        "Privacy    yes (REDACTED FOR PRIVACY)",
+        "Registrar  MarkMonitor Inc.",
+        "DNS        ns1.google.com, ns2.google.com, ns3.google.com, ns4.google.com",
+    ]
 
 
 def test_privacy_lookup_failure_keeps_unknown(tmp_path: Path) -> None:
@@ -130,14 +154,16 @@ def test_privacy_lookup_failure_keeps_unknown(tmp_path: Path) -> None:
 
 
 def test_privacy_lookup_skipped_when_whois_decides(tmp_path: Path) -> None:
-    h = Harness(tmp_path, whois={"google.io": whois_fixture("google.io")})
+    h = Harness(tmp_path, whois={"google.io": whois_fixture("google.io")}, environ=dict(CREDS))
+    h.http.routes[SPACESHIP_URL] = spaceship_answers({})
     assert h.run("google.io") == 0
     assert "Privacy    no (Google LLC)\n" in h.out
-    assert h.http.calls == []
+    assert h.http.urls() == [SPACESHIP_URL]
 
 
 def test_app_privacy_follows_registrar_link_from_registry_rdap(tmp_path: Path) -> None:
-    h = Harness(tmp_path, whois={"cash.app": whois_fixture("cash.app")})
+    h = Harness(tmp_path, whois={"cash.app": whois_fixture("cash.app")}, environ=dict(CREDS))
+    h.http.routes[SPACESHIP_URL] = spaceship_answers({})
     h.http.routes[GOOGLE_RDAP + "cash.app"] = Response(200, rdap_fixture("cash.app.json"))
     h.http.routes["https://rdap.cscglobal.com/dbs/rdap-api/v1/domain/cash.app"] = Response(
         200, rdap_fixture("registrar_spaceship.com.json")
@@ -152,18 +178,18 @@ def test_verbose_prints_raw_whois_first(tmp_path: Path) -> None:
     h = Harness(tmp_path, whois={"google.com": raw})
     assert h.run("-v", "google.com") == 0
     assert h.out.startswith(raw)
-    assert h.out.rstrip().endswith("ns4.google.com")
+    assert summary_lines(h.out[len(raw) :])[-1].endswith("ns4.google.com")
 
 
 def test_missing_fields_are_hidden_but_privacy_stays(tmp_path: Path) -> None:
     h = Harness(tmp_path, whois={"google.de": whois_fixture("google.de")})
     assert h.run("google.de") == 0
-    assert h.out == (
-        "google.de  REGISTERED\n"
-        "Updated    2018-03-12\n"
-        "Privacy    unknown\n"
-        "DNS        ns1.google.com, ns2.google.com, ns3.google.com, ns4.google.com\n"
-    )
+    assert summary_lines(h.out) == [
+        "google.de  REGISTERED",
+        "Updated    2018-03-12",
+        "Privacy    unknown",
+        "DNS        ns1.google.com, ns2.google.com, ns3.google.com, ns4.google.com",
+    ]
 
 
 def test_app_falls_back_to_rdap(tmp_path: Path) -> None:
@@ -241,6 +267,7 @@ def test_name_mode_with_spaceship(tmp_path: Path) -> None:
         "foobar.net  taken      -\n"
         "foobar.org  taken      -\n"
         "foobar.app  available  1200.00 USD\n"
+        "Taken: 3/4\n"
         "\n"
         "Backend: Spaceship\n"
     )
@@ -442,7 +469,7 @@ def test_metrics_command_rows_order_and_dr_preference(tmp_path: Path) -> None:
     )
     assert h.run("google.io") == 0
     assert h.command_calls == [["my-metrics", "--fast", "google.io"]]
-    assert h.out.splitlines()[-3:] == [
+    assert summary_lines(h.out)[-3:] == [
         "Traffic    745.6M/mo (demo, 2026-10)",
         "DR         91 (demo)",
         "Rank       #34 (tranco)",
@@ -454,7 +481,7 @@ def test_metrics_command_without_dr_keeps_builtin_dr(tmp_path: Path) -> None:
         tmp_path, environ={"DOMAIN_I_METRICS_CMD": "m"}, metrics=_builtin, command_output='{"traffic": 999}'
     )
     h.run("google.io")
-    assert h.out.splitlines()[-3:] == ["Traffic    999/mo (custom)", "DR         90 (ahrefs)", "Rank       #34 (tranco)"]
+    assert summary_lines(h.out)[-3:] == ["Traffic    999/mo (custom)", "DR         90 (ahrefs)", "Rank       #34 (tranco)"]
 
 
 def test_metrics_command_from_config_file(tmp_path: Path) -> None:
@@ -530,5 +557,99 @@ def test_traffic_and_dr_have_distinct_colours(tmp_path: Path) -> None:
         command_output='{"traffic": 5000, "dr": 40}',
     )
     h.run("google.io")
-    codes = {ANSI.sub("", line).split()[0]: ANSI.findall(line)[0] for line in h.out.splitlines()[-3:]}
+    codes = {ANSI.sub("", line).split()[0]: ANSI.findall(line)[0] for line in summary_lines(h.out)[-3:]}
     assert len({codes["Traffic"], codes["DR"], codes["Rank"]}) == 3
+
+
+# --- other TLDs after a lookup ---------------------------------------------------------
+
+
+def test_registered_domain_row_stays_in_place_with_marker(tmp_path: Path) -> None:
+    h = Harness(tmp_path, whois={"google.com": whois_fixture("google.com")}, environ=dict(CREDS))
+    # The backend disagrees about google.com; the row must follow the lookup.
+    h.http.routes[SPACESHIP_URL] = spaceship_answers({"google.com": "available", "google.org": "available"})
+    assert h.run("--no-metrics", "--tlds", "net,com,org", "google.com") == 0
+    lines = ANSI.sub("", h.out).splitlines()
+    assert lines[lines.index("") + 1].startswith("Domain")
+    assert table_rows(h.out) == [
+        "google.net  taken",
+        "google.com  taken      \u2190 this",
+        "google.org  available",
+    ]
+    assert "Taken: 2/3" in h.out
+
+
+def test_registered_domain_outside_tld_list_is_first_row(tmp_path: Path) -> None:
+    h = Harness(tmp_path, whois={"google.io": whois_fixture("google.io")}, environ=dict(CREDS))
+    h.http.routes[SPACESHIP_URL] = spaceship_answers({"google.app": "available"})
+    assert h.run("google.io") == 0
+    rows = table_rows(h.out)
+    assert [r.split()[0] for r in rows] == ["google.io", "google.com", "google.net", "google.org", "google.app"]
+    assert rows[0].endswith("\u2190 this")
+    assert "Taken: 3/4\n" in h.out  # the queried .io is not one of the configured names
+
+
+def test_registered_and_all_others_taken_checks_hyphen(tmp_path: Path) -> None:
+    h = Harness(tmp_path, whois={"foobar.com": whois_fixture("google.com")}, environ=dict(CREDS))
+    h.http.routes[SPACESHIP_URL] = spaceship_answers({"foo-bar.net": "available"})
+    assert h.run("foobar.com") == 0
+    domains = [r.split()[0] for r in table_rows(h.out)]
+    assert domains[4:] == ["foo-bar.com", "foo-bar.net", "foo-bar.org", "foo-bar.app"]
+    assert "Taken: 4/4\n" in h.out
+    assert "hyphenated variants were checked" in h.out
+
+
+def test_unknown_lookup_still_marks_row_and_uses_backend_status(tmp_path: Path) -> None:
+    h = Harness(tmp_path, whois={"foobar.zz": "% IANA WHOIS server\nrefer:\n\ndomain: ZZ\n"}, environ=dict(CREDS))
+    h.http.routes[SPACESHIP_URL] = spaceship_answers({"foobar.zz": "unknown", "foobar.app": "available"})
+    h.http.routes[BOOTSTRAP_URL] = Response(200, rdap_fixture("dns.json"))
+    assert h.run("foobar.zz") == 0
+    assert h.out.splitlines()[0] == "foobar.zz  UNKNOWN"
+    rows = table_rows(h.out)
+    assert rows[0].split()[:2] == ["foobar.zz", "unknown"] and rows[0].endswith("\u2190 this")
+
+
+def test_table_failure_keeps_summary_and_exit_code(tmp_path: Path) -> None:
+    h = Harness(tmp_path, whois={"google.com": whois_fixture("google.com")})
+    h.http.routes["*"] = NetworkError("offline")
+    assert h.run("google.com") == 0
+    assert summary_lines(h.out)[0] == "google.com  REGISTERED"
+    assert "Domain " not in h.out
+    assert "Other TLDs could not be checked" in h.out
+
+
+@pytest.mark.parametrize(
+    ("states", "expected"),
+    [
+        ({"com": 200, "net": 200, "org": 200, "app": 200}, "Taken: 4/4"),
+        ({"com": 200, "net": 200, "org": 200, "app": 404}, "Taken: 3/4"),
+        ({"com": 200, "net": 200, "org": 500, "app": 404}, "Taken: 2/4 (1 unknown)"),
+    ],
+)
+def test_taken_summary_line(tmp_path: Path, states: dict[str, int], expected: str) -> None:
+    h = Harness(tmp_path)
+    h.http.routes.update(no_spaceship_rdap({f"foobar.{t}": code for t, code in states.items()}))
+    h.http.routes["https://rdap.verisign.com/com/v1/domain/foo-bar.com"] = Response(404, b"")
+    h.http.routes["*"] = Response(404, b"")
+    h.run("foobar")
+    assert expected + "\n" in h.out
+
+
+def test_availability_check_starts_while_whois_runs(tmp_path: Path) -> None:
+    started = threading.Event()
+    h = Harness(tmp_path, environ=dict(CREDS))
+
+    def answer(call: Call) -> Response:
+        started.set()
+        return spaceship_answers({})(call)
+
+    h.http.routes[SPACESHIP_URL] = answer
+    seen_during_whois: list[bool] = []
+
+    def slow_whois(argv: list[str], timeout: float) -> str:
+        seen_during_whois.append(started.wait(timeout=2.0))
+        return whois_fixture("google.com")
+
+    h.whois_override = slow_whois
+    assert h.run("--no-metrics", "google.com") == 0
+    assert seen_during_whois == [True]

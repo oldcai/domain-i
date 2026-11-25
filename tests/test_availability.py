@@ -7,6 +7,7 @@ from domain_i.availability import (
     CheckResult,
     Row,
     check_domains,
+    first_batch,
     parse_tlds,
     resolve_tlds,
     run_availability,
@@ -73,7 +74,26 @@ def test_original_domain_is_first_row_and_not_duplicated() -> None:
     report2 = run_availability(("foo", "bar"), ALL, "foobar.com", FakeChecker({}))
     assert [r.domain for r in report2.rows] == ["foobar.com", "foobar.net", "foobar.org", "foobar.app"]
     report3 = run_availability(("foo", "bar"), ALL, "foobar.app", FakeChecker({}))
-    assert [r.domain for r in report3.rows] == ["foobar.app", "foobar.com", "foobar.net", "foobar.org"]
+    assert [r.domain for r in report3.rows] == ["foobar.com", "foobar.net", "foobar.org", "foobar.app"]
+
+
+def test_known_status_overrides_backend_and_counts() -> None:
+    checker = FakeChecker(
+        {"foobar.com": "available", "foobar.net": "taken", "foobar.org": "unknown", "foobar.app": "available"}
+    )
+    report = run_availability(("foo", "bar"), ALL, "foobar.com", checker, known={"foobar.com": "taken"})
+    assert report.rows[0] == Row("foobar.com", "taken", None)
+    assert (report.taken, report.total, report.unknown) == (2, 4, 1)
+    assert report.queried == "foobar.com"
+
+
+def test_precomputed_first_batch_is_used() -> None:
+    first = CheckResult([Row(f"foobar.{t}", "taken", None) for t in ALL], "Pre")
+    checker = FakeChecker({})
+    report = run_availability(("foo", "bar"), ALL, None, checker, first=first)
+    assert checker.batches == [["foo-bar.com", "foo-bar.net", "foo-bar.org", "foo-bar.app"]]
+    assert report.backends[0] == "Pre"
+    assert first_batch(("foo", "bar"), ALL, "foobar.io") == ["foobar.io", *[f"foobar.{t}" for t in ALL]]
 
 
 def test_original_domain_status_does_not_block_hyphen() -> None:

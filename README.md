@@ -44,6 +44,16 @@ Privacy    yes (REDACTED FOR PRIVACY)
 Registrar  MarkMonitor Inc.
 DNS        dns1.p08.nsone.net, dns2.p08.nsone.net, ns-1283.awsdns-32.org, ...
 Rank       #34 (tranco)
+
+Domain      Status
+github.com  taken   ← this
+github.net  taken
+github.org  taken
+github.app  taken
+Taken: 4/4
+
+No hyphenated variant: 'github' could not be split into words. Retry with spaces to choose the split, e.g. domain-i git hub
+Backend: Spaceship
 ```
 
 * Dates are normalised to `YYYY-MM-DD`; `Expires` shows the days left.
@@ -58,8 +68,15 @@ Rank       #34 (tranco)
   on some clients) fall back to [RDAP](https://about.rdap.org/).
 * A domain is only reported as **not registered** on positive evidence (a WHOIS
   "not found" answer or an RDAP 404). Timeouts or empty answers are reported as
-  **UNKNOWN**. In both cases domain-i continues in availability mode with the
-  domain as the first row.
+  **UNKNOWN**.
+
+* After the summary comes the same table as availability mode (below) for
+  the name in your configured TLDs, so you see at a glance how taken the name
+  is. The looked-up domain keeps its place in the list (or comes first if its
+  TLD is not in the list), is marked `← this`, and always shows the status of
+  the lookup above. That check starts in parallel with WHOIS, so it adds little
+  time; if it fails, a one-line note replaces the table and the exit code is
+  unaffected.
 
 Anything like `https://www.Example.com/path` is cleaned to `example.com`.
 
@@ -76,6 +93,7 @@ password-manager.com  taken
 password-manager.net  taken
 password-manager.org  taken
 password-manager.app  taken
+Taken: 4/4
 
 All plain names are taken, so hyphenated variants were checked too.
 Backend: Spaceship
@@ -84,7 +102,8 @@ Backend: Spaceship
 * Words come from spaces or hyphens (`foo bar`, `foo-bar`); a single word is
   split with wordninja (`foobar` -> `foo bar`).
 * The plain name is checked first. Hyphenated variants are checked **only if every
-  plain name is confirmed taken**. A single word that cannot be split gets a
+  plain name is confirmed taken**. `Taken: n/m` counts the plain name in the
+  configured TLDs (`(k unknown)` is added when some could not be checked). A single word that cannot be split gets a
   hint to retry with spaces.
 * The `Price` column only appears when an available name carries a premium
   price (Spaceship backend only).

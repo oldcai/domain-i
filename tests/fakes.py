@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 
 from domain_i.http import NetworkError, Response
@@ -19,7 +19,7 @@ class Call:
 class FakeHttp:
     """Routes exact URLs (or URL prefixes ending with '*') to canned responses."""
 
-    routes: dict[str, Response | Exception] = field(default_factory=dict)
+    routes: dict[str, Response | Exception | Callable[[Call], Response]] = field(default_factory=dict)
     calls: list[Call] = field(default_factory=list)
 
     def request(
@@ -42,7 +42,9 @@ class FakeHttp:
             raise NetworkError(f"unrouted URL in test: {url}")
         if isinstance(target, Exception):
             raise target
-        return target
+        if isinstance(target, Response):
+            return target
+        return target(self.calls[-1])
 
     def urls(self) -> list[str]:
         return [c.url for c in self.calls]
