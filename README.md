@@ -88,7 +88,8 @@ Backend: Spaceship
   hint to retry with spaces.
 * The `Price` column only appears when an available name carries a premium
   price (Spaceship backend only).
-* Status colours: green `available`, yellow `taken`, dim `unknown`.
+* Status colours: green `available`, yellow `taken`, dim `unknown`. Metric
+  rows: cyan `Traffic`, magenta `DR`, blue `Rank`.
 
 ## Configuration
 
@@ -147,6 +148,51 @@ unavailable (`--no-metrics` turns them off):
 * `DR N (ahrefs)` - Ahrefs Domain Rating via the free
   [`domain-rating-free`](https://docs.ahrefs.com/) endpoint. Only shown when
   `AHREFS_API_KEY` is set (environment or config file). Domain Rating by Ahrefs.
+
+### Bring your own metrics source
+
+If you have another source of traffic or authority numbers, point
+`DOMAIN_I_METRICS_CMD` at a command (environment variable or any config
+`*.env` file; the environment wins). For registered domains domain-i runs it
+in the background with the domain appended as the last argument, without a
+shell (`~` in arguments is expanded), and waits at most 8 seconds.
+
+The command prints one JSON object on stdout. Every field is optional and
+unknown fields are ignored:
+
+| Field | Meaning |
+| --- | --- |
+| `traffic` | estimated monthly visits (number) |
+| `traffic_month` | the month the estimate is for, e.g. `"2026-10"` |
+| `dr` | an authority score from 0 to 100 (number) |
+| `source` | name shown in brackets; defaults to `custom` |
+
+A made-up example, `~/bin/acme-metrics`:
+
+```python
+#!/usr/bin/env python3
+import json, sys
+
+domain = sys.argv[-1]
+# ... look the domain up in your own data ...
+print(json.dumps({"traffic": 1234567, "traffic_month": "2026-10", "dr": 42, "source": "acme"}))
+```
+
+```
+# ~/.config/domain-i/config.env
+DOMAIN_I_METRICS_CMD=~/bin/acme-metrics
+```
+
+```
+Traffic    1.2M/mo (acme, 2026-10)
+DR         42 (acme)
+Rank       #34 (tranco)
+```
+
+Rows appear in the order Traffic, DR, Rank. A `dr` from the command replaces
+the Ahrefs row. Missing, zero or non-numeric values, a non-zero exit status, a
+timeout or output that is not a JSON object simply leave the rows out; run with
+`-v` to see why on stderr. `--no-metrics` skips the command.
 
 ### Colour
 

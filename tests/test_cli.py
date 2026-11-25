@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
@@ -36,6 +37,8 @@ class Harness:
     environ: dict[str, str] = field(default_factory=dict)
     isatty: bool = False
     metrics: Callable[[str], list[Metric]] | None = None
+    command_output: str | Exception = "{}"
+    command_calls: list[list[str]] = field(default_factory=list)
     whois_calls: list[str] = field(default_factory=list)
     stdout: io.StringIO = field(default_factory=io.StringIO)
     stderr: io.StringIO = field(default_factory=io.StringIO)
@@ -46,6 +49,12 @@ class Harness:
             if argv[-1] not in self.whois:
                 raise FileNotFoundError("whois")
             return self.whois[argv[-1]]
+
+        def command_runner(argv: list[str], timeout: float) -> str:
+            self.command_calls.append(argv)
+            if isinstance(self.command_output, Exception):
+                raise self.command_output
+            return self.command_output
 
         deps = Deps(
             http=self.http,
@@ -59,6 +68,7 @@ class Harness:
             isatty=self.isatty,
             splitter=splitter,
             metrics=self.metrics,
+            command_runner=command_runner,
         )
         return main(list(args), deps)
 
@@ -409,3 +419,116 @@ def test_no_metrics_flag_skips_fetch(tmp_path: Path) -> None:
 
 def test_fixture_dir_exists() -> None:
     assert (FIXTURES / "whois").is_dir()
+
+
+# --- DOMAIN_I_METRICS_CMD -----------------------------------------------------------
+
+
+def _builtin(domain: str) -> list[Metric]:
+    return [Metric("DR", "90", "ahrefs"), Metric("Rank", "#34", "tranco")]
+
+
+def _registered(tmp_path: Path, **kw: object) -> Harness:
+    h = Harness(tmp_path, whois={"google.io": whois_fixture("google.io")}, **kw)  # type: ignore[arg-type]
+    return h
+
+
+def test_metrics_command_rows_order_and_dr_preference(tmp_path: Path) -> None:
+    h = _registered(
+        tmp_path,
+        environ={"DOMAIN_I_METRICS_CMD": "my-metrics --fast"},
+        metrics=_builtin,
+        command_output='{"traffic": 745628929, "traffic_month": "2026-10", "dr": 91, "source": "demo"}',
+    )
+    assert h.run("google.io") == 0
+    assert h.command_calls == [["my-metrics", "--fast", "google.io"]]
+    assert h.out.splitlines()[-3:] == [
+        "Traffic    745.6M/mo (demo, 2026-10)",
+        "DR         91 (demo)",
+        "Rank       #34 (tranco)",
+    ]
+
+
+def test_metrics_command_without_dr_keeps_builtin_dr(tmp_path: Path) -> None:
+    h = _registered(
+        tmp_path, environ={"DOMAIN_I_METRICS_CMD": "m"}, metrics=_builtin, command_output='{"traffic": 999}'
+    )
+    h.run("google.io")
+    assert h.out.splitlines()[-3:] == ["Traffic    999/mo (custom)", "DR         90 (ahrefs)", "Rank       #34 (tranco)"]
+
+
+def test_metrics_command_from_config_file(tmp_path: Path) -> None:
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "config.env").write_text("DOMAIN_I_METRICS_CMD=from-file\n")
+    h = _registered(tmp_path, command_output='{"traffic": 1000}')
+    h.run("google.io")
+    assert h.command_calls == [["from-file", "google.io"]]
+    assert "Traffic    1.0K/mo (custom)\n" in h.out
+
+
+def test_env_metrics_command_overrides_config_file(tmp_path: Path) -> None:
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "config.env").write_text("DOMAIN_I_METRICS_CMD=from-file\n")
+    h = _registered(tmp_path, environ={"DOMAIN_I_METRICS_CMD": "from-env"})
+    h.run("google.io")
+    assert h.command_calls == [["from-env", "google.io"]]
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        "not json",
+        '{"traffic": 0}',
+        subprocess.TimeoutExpired(["m"], 8.0),
+        subprocess.CalledProcessError(1, ["m"]),
+        FileNotFoundError(2, "No such file or directory"),
+    ],
+)
+def test_metrics_command_failures_are_silent(tmp_path: Path, output: str | Exception) -> None:
+    h = _registered(tmp_path, environ={"DOMAIN_I_METRICS_CMD": "m"}, command_output=output)
+    assert h.run("google.io") == 0
+    assert "Traffic" not in h.out
+    assert h.stderr.getvalue() == ""
+
+
+def test_metrics_command_failure_reason_on_stderr_with_verbose(tmp_path: Path) -> None:
+    h = _registered(
+        tmp_path, environ={"DOMAIN_I_METRICS_CMD": "m"}, command_output=subprocess.CalledProcessError(3, ["m"])
+    )
+    assert h.run("-v", "google.io") == 0
+    assert "metrics command" in h.stderr.getvalue()
+    assert "exit status 3" in h.stderr.getvalue()
+
+
+def test_metrics_command_not_configured_or_disabled(tmp_path: Path) -> None:
+    h = _registered(tmp_path)
+    h.run("google.io")
+    assert h.command_calls == []
+    h2 = _registered(tmp_path, environ={"DOMAIN_I_METRICS_CMD": "m"}, command_output='{"traffic": 5}')
+    h2.run("--no-metrics", "google.io")
+    assert h2.command_calls == []
+    assert "Traffic" not in h2.out
+
+
+def test_metrics_command_not_run_for_unregistered_domain(tmp_path: Path) -> None:
+    name = "xq7zvkpl3qwmnotreal"
+    h = Harness(
+        tmp_path,
+        whois={f"{name}.com": whois_fixture("unregistered.com")},
+        environ={"DOMAIN_I_METRICS_CMD": "m"},
+    )
+    h.http.routes["*"] = Response(404, b"")
+    h.run(f"{name}.com")
+    assert h.command_calls == []
+
+
+def test_traffic_and_dr_have_distinct_colours(tmp_path: Path) -> None:
+    h = _registered(
+        tmp_path,
+        environ={"DOMAIN_I_METRICS_CMD": "m", "FORCE_COLOR": "1"},
+        metrics=_builtin,
+        command_output='{"traffic": 5000, "dr": 40}',
+    )
+    h.run("google.io")
+    codes = {ANSI.sub("", line).split()[0]: ANSI.findall(line)[0] for line in h.out.splitlines()[-3:]}
+    assert len({codes["Traffic"], codes["DR"], codes["Rank"]}) == 3

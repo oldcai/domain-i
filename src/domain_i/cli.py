@@ -18,7 +18,16 @@ from .config import default_cache_dir, default_config_dir, read_config
 from .http import Http, UrllibHttp
 from .info import DomainInfo
 from .inputs import DomainQuery, InputError, Splitter, name_from_domain, parse_query, words_for
-from .metrics import Metric, MetricsFetcher, fetch_metrics
+from .metrics import (
+    COMMAND_VAR,
+    CommandRunner,
+    Metric,
+    MetricsFetcher,
+    default_command_runner,
+    fetch_metrics,
+    merge_metrics,
+    run_metrics_command,
+)
 from .rdap import Rdap, info_from_rdap
 from .spaceship import Availability, check, load_credentials
 from .whois import WhoisRunner, default_runner, parse_whois, run_whois
@@ -31,9 +40,9 @@ COLORS = {
     "available": "\x1b[1;32m",  # bold green
     "taken": "\x1b[1;33m",  # bold yellow
     "unknown": "\x1b[2m",  # dim
-    "Rank": "\x1b[36m",  # cyan
-    "Traffic": "\x1b[36m",
+    "Traffic": "\x1b[36m",  # cyan
     "DR": "\x1b[35m",  # magenta
+    "Rank": "\x1b[34m",  # blue
 }
 HEADER_STATE = {"available": "NOT REGISTERED", "taken": "REGISTERED", "unknown": "UNKNOWN"}
 LABEL_WIDTH = len("Registrar") + 2
@@ -52,6 +61,7 @@ class Deps:
     isatty: bool
     splitter: Splitter
     metrics: MetricsFetcher | None
+    command_runner: CommandRunner = default_command_runner
 
 
 class Painter:
@@ -81,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("query", nargs="*", help="example.com | foobar | foo bar | foo-bar")
     parser.add_argument("-v", "--verbose", action="store_true", help="print raw WHOIS / RDAP output first")
-    parser.add_argument("--no-metrics", action="store_true", help="skip the Rank/DR lookups for registered domains")
+    parser.add_argument("--no-metrics", action="store_true", help="skip the Traffic/DR/Rank lookups for registered domains")
     parser.add_argument("--color", action="store_true", help="force coloured output")
     parser.add_argument("--tlds", metavar="LIST", help="TLDs to check in availability mode, e.g. com,io,dev")
     return parser
@@ -239,17 +249,33 @@ def main(argv: Sequence[str], deps: Deps) -> int:
                 state = "unknown"
                 reason = "No registration record found via WHOIS or RDAP" + (f" ({why})." if why else ".")
         if info is not None:
-            if info.privacy == "unknown":
-                # Registries rarely carry registrant data and many registrars have
-                # dropped port 43, so ask the registrar's RDAP server instead.
-                registry_data = registry_rdap
-                privacy_job = _Background(
-                    lambda: rdap.registrar_privacy(domain, registry_data), None, deadline
-                )
-                privacy = privacy_job.result()
-                if privacy is not None:
-                    info = replace(info, privacy=privacy)
-            metrics = background.result() if background is not None else []
+            # Only for registered domains: the user's metrics command (if any) ...
+            command = (deps.environ.get(COMMAND_VAR) or config.get(COMMAND_VAR) or "").strip()
+            runner = deps.command_runner
+            no_result: tuple[list[Metric], str | None] = ([], "did not finish in time")
+            command_job = (
+                _Background(lambda: run_metrics_command(command, domain, runner), no_result, deadline)
+                if command and not args.no_metrics
+                else None
+            )
+            # ... and, when WHOIS could not decide privacy, the registrar's RDAP record
+            # (registries rarely carry registrant data; many registrars dropped port 43).
+            registry_data = registry_rdap
+            privacy_job = (
+                _Background(lambda: rdap.registrar_privacy(domain, registry_data), None, deadline)
+                if info.privacy == "unknown"
+                else None
+            )
+            privacy = privacy_job.result() if privacy_job is not None else None
+            if privacy is not None:
+                info = replace(info, privacy=privacy)
+            custom: list[Metric] = []
+            if command_job is not None:
+                custom, command_error = command_job.result()
+                if command_error and args.verbose:
+                    print(f"domain-i: metrics command failed: {command_error}", file=deps.stderr)
+            builtin = background.result() if background is not None else []
+            metrics = merge_metrics(custom, builtin)
             out.write(render_header(domain, "taken", paint) + "\n")
             for line in render_info(info, deps.today, metrics, paint):
                 out.write(line + "\n")
