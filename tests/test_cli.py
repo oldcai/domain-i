@@ -872,7 +872,7 @@ def test_colour_for_metric_cells_follows_summary_rules(tmp_path: Path) -> None:
 
 
 def test_price_column_only_with_premium(tmp_path: Path) -> None:
-    def run(statuses: dict[str, str], premium: dict[str, list]) -> list[str]:
+    def run(statuses: dict[str, str], premium: dict[str, list[object]]) -> list[str]:
         h = Harness(tmp_path, whois={"google.com": whois_fixture("google.com")}, environ=dict(CREDS2))
         def answer(call: Call) -> Response:
             asked = json.loads(call.body or b"{}")["domains"]

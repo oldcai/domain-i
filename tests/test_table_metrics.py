@@ -188,9 +188,9 @@ def test_price_column_follows_data_like_traffic_and_dr() -> None:
         rows=[Row("p.com", "taken", None)],
         backends=[], hyphen_checked=False, hint=None,
     )
-    final = TableFrame(plain, commands, {"p.com": [Metric("Traffic", "167/mo", "aitdk")]}, paint=PAINT).render(final=True)
+    final = TableFrame(plain, commands, {"p.com": [Metric("Traffic", "167/mo", "demo")]}, paint=PAINT).render(final=True)
     header = final[0].split()
     assert header == ["Domain", "Status", "Traffic"]
-    premium_final = TableFrame(premium, commands, {"p.com": [Metric("Traffic", "167/mo", "aitdk")]}, paint=PAINT).render(final=True)
+    premium_final = TableFrame(premium, commands, {"p.com": [Metric("Traffic", "167/mo", "demo")]}, paint=PAINT).render(final=True)
     assert premium_final[0].split() == ["Domain", "Status", "Traffic", "Price"]
     assert any("827.17 USD" in line for line in premium_final)
