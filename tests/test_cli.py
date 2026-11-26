@@ -745,20 +745,6 @@ def test_unsplittable_name_with_taken_primary_gets_hint(tmp_path: Path) -> None:
     assert "was checked too" not in h.out
 
 
-def test_availability_table_never_runs_metrics_commands(tmp_path: Path) -> None:
-    h = Harness(tmp_path, environ=dict(CREDS) | {"DOMAIN_I_METRICS_CMD": "m"})
-    h.http.routes[SPACESHIP_URL] = spaceship_answers({})
-    h.run("foobar")
-    name = "xq7zvkpl3qwmnotreal"
-    h2 = Harness(tmp_path, whois={f"{name}.com": whois_fixture("unregistered.com")}, environ=dict(CREDS) | {"DOMAIN_I_METRICS_CMD": "m"})
-    h2.http.routes[SPACESHIP_URL] = spaceship_answers({}, default="available")
-    h2.run(f"{name}.com")
-    assert h.command_calls == [] and h2.command_calls == []
-
-
-# --- Traffic/DR columns in the availability table -------------------------------------
-
-
 CREDS2 = dict(CREDS) | {"DOMAIN_I_METRICS_CMD_TRAFFIC": "traffic-tool", "DOMAIN_I_METRICS_CMD_DR": "dr-tool --q"}
 TRAFFIC_OUT = '{"traffic": 123456, "source": "t"}'
 DR_OUT = '{"dr": 42, "source": "d"}'

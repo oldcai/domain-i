@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
 from typing import TYPE_CHECKING
 
+from .availability import Row
 from .metrics import CommandRunner, Metric, run_metrics_command
 
 QUERIED_MARK = "\u2190 this"
@@ -157,10 +158,6 @@ class TableFrame:
         paint = self.paint or Painter(False)
         rows = self.report.rows
         show = bool(self.commands) and any(r.status == "taken" for r in rows)
-        if is_final and show:
-            show = any(self.values.get(r.domain) for r in rows if r.status == "taken")
-        if not show:
-            return _plain_table(self.report, paint)
         traffic: dict[str, str] = {}
         dr: dict[str, str] = {}
         for domain, metrics in self.values.items():
@@ -168,6 +165,11 @@ class TableFrame:
                 value = _cell_value(metrics, label)
                 if value:
                     key[domain] = value
+        if is_final and show:
+            # in the final frame a column that resolved to no value at all is dropped
+            show = bool(traffic) or bool(dr)
+        if not show:
+            return _plain_table(self.report, paint)
         w0 = max([len("Domain"), *(len(r.domain) for r in rows)])
         w1 = max([len("Status"), *(len(r.status) for r in rows)])
         wt = max([len("Traffic"), *([len(v) for v in traffic.values()] or [len(PLACEHOLDER)])])
@@ -185,23 +187,28 @@ class TableFrame:
             text = "  ".join(cells).rstrip()
             return paint(colour, text) if colour else text
 
-        header_cells = [
-            f"{'Domain':<{w0}}",
-            f"{'Status':<{w1}}",
-            f"{'Traffic':<{wt}}",
-            f"{'DR':<{wd}}",
-            "Price",
-        ]
+        pending = not is_final
+        show_traffic = pending or bool(traffic)
+        show_dr = pending or bool(dr)
+
+        def row_cells(r: Row) -> list[str]:
+            cells = [f"{r.domain:<{w0}}", f"{r.status:<{w1}}"]
+            if show_traffic:
+                cells.append(cell(r.domain, traffic, wt, "Traffic"))
+            if show_dr:
+                cells.append(cell(r.domain, dr, wd, "DR"))
+            cells.append(r.price or "-")
+            return cells
+
+        header_cells = [f"{'Domain':<{w0}}", f"{'Status':<{w1}}"]
+        if show_traffic:
+            header_cells.append(f"{'Traffic':<{wt}}")
+        if show_dr:
+            header_cells.append(f"{'DR':<{wd}}")
+        header_cells.append("Price")
         lines = [line(header_cells, False, None)]
         for r in rows:
-            cells = [
-                f"{r.domain:<{w0}}",
-                f"{r.status:<{w1}}",
-                cell(r.domain, traffic, wt, "Traffic"),
-                cell(r.domain, dr, wd, "DR"),
-                r.price or "-",
-            ]
-            lines.append(line(cells, r.domain == self.report.queried, r.status))
+            lines.append(line(row_cells(r), r.domain == self.report.queried, r.status))
         unknown = f" ({self.report.unknown} unknown)" if self.report.unknown else ""
         lines.append(f"Taken: {self.report.taken}/{self.report.total}{unknown}")
         return lines

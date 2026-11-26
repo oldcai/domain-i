@@ -246,8 +246,8 @@ def main(argv: Sequence[str], deps: Deps) -> int:
 
     if not isinstance(query, DomainQuery):
         report = run_availability(query.words, tlds, None, checker)
-        render_report(report, paint, out)
-        return 1 if report.rows and all(r.status == "unknown" for r in report.rows) else 0
+        code = render_availability(report, args, deps, config, paint, out)
+        return 1 if report.rows and all(r.status == "unknown" for r in report.rows) else code
 
     domain = query.domain
     summary_metrics: dict[str, list[Metric]] = {}  # the looked-up domain's metrics, reused in the table
@@ -343,13 +343,29 @@ def main(argv: Sequence[str], deps: Deps) -> int:
         out.write(f"Other TLDs could not be checked ({first.backend}).\n")
         return 1 if state == "unknown" else 0
 
-    # Traffic/DR for the taken rows: the queried domain reuses the summary's
-    # numbers; the other taken rows run the metrics commands concurrently.
-    # The summary values arrive by now (its background work shares the same
-    # deadline and is collected above), so the queried row is never re-queried.
+    render_availability(report, args, deps, config, paint, out, summary_metrics)
+    return 0
+
+
+def render_availability(
+    report: Report,
+    args: argparse.Namespace,
+    deps: Deps,
+    config: Mapping[str, str],
+    paint: Painter,
+    out: TextIO,
+    summary_metrics: Mapping[str, list[Metric]] | None = None,
+) -> int:
+    """Print the availability table, filling Traffic/DR for taken rows.
+
+    ``summary_metrics`` carries numbers the lookup summary already fetched
+    (keyed by the queried domain); those cells are reused, not re-queried.
+    """
+    known_map = summary_metrics or {}
     commands = [] if args.no_metrics else metrics_commands(deps.environ, config)
-    in_hand: list[Metric] = summary_metrics.get(domain, [])
-    pre: dict[str, list[Metric]] = {domain: in_hand} if in_hand else {}
+    in_hand: list[Metric] = known_map.get(report.queried or "", [])
+    queried = report.queried
+    pre: dict[str, list[Metric]] = {queried: in_hand} if in_hand and queried else {}
     plan = plan_cells(report, commands, known_metrics=pre)
     cells = TableFrame(report, commands, dict(pre), paint=paint)
     animate = deps.isatty and bool(plan)
@@ -392,8 +408,7 @@ def main(argv: Sequence[str], deps: Deps) -> int:
     if args.verbose:
         for error in errors:
             print(f"domain-i: metrics command failed {error}", file=deps.stderr)
-    for line in cells.render(final=True):
-        out.write(line + "\n")
+    out.writelines(line + "\n" for line in cells.render(final=True))
     out.write("\n")
     if report.note:
         out.write(report.note + "\n")
