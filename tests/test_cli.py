@@ -758,7 +758,7 @@ def test_table_placeholder_then_final_columns(tmp_path: Path) -> None:
     lines = ANSI.sub("", h.out).splitlines()
     start = next(i for i, line in enumerate(lines) if line.startswith("Domain"))
     table = lines[start:]
-    assert table[0].split()[:5] == ["Domain", "Status", "Traffic", "DR", "Price"]
+    assert table[0].split() == ["Domain", "Status", "Traffic", "DR"]
     row = next(line for line in table if line.startswith("google.com"))
     assert row.split()[:4] == ["google.com", "taken", "123.5K", "42"] and row.endswith("this")
     assert "google.net" in h.out and "google.app" in h.out
@@ -869,3 +869,28 @@ def test_colour_for_metric_cells_follows_summary_rules(tmp_path: Path) -> None:
     # row-leading status colour
     before_value = re.search(r"\x1b\[([0-9;]+)m123\.5K", h.out.splitlines()[table_idx])
     assert before_value is not None and f"\x1b[{before_value[1]}m" == ANSI.findall(h.out.splitlines()[idx])[0]
+
+
+def test_price_column_only_with_premium(tmp_path: Path) -> None:
+    def run(statuses: dict[str, str], premium: dict[str, list]) -> list[str]:
+        h = Harness(tmp_path, whois={"google.com": whois_fixture("google.com")}, environ=dict(CREDS2))
+        def answer(call: Call) -> Response:
+            asked = json.loads(call.body or b"{}")["domains"]
+            items = [
+                {"domain": d, "result": statuses.get(d, "taken"), "premiumPricing": premium.get(d, [])}
+                for d in asked
+            ]
+            return Response(200, json.dumps({"domains": items}).encode())
+        h.http.routes[SPACESHIP_URL] = answer
+        h.command_outputs = {"traffic-tool": TRAFFIC_OUT, "dr-tool": DR_OUT}
+        h.run("google.com")
+        lines = ANSI.sub("", h.out).splitlines()
+        start = next(i for i, line in enumerate(lines) if line.startswith("Domain"))
+        return lines[start:]
+
+    without = run({}, {})
+    assert without[0].split() == ["Domain", "Status", "Traffic", "DR"]
+    assert all("-" not in row.split() for row in without[1:-1])
+    with_premium = run({"google.app": "available"}, {"google.app": [{"operation": "register", "price": 1200, "currency": "usd"}]})
+    assert with_premium[0].split() == ["Domain", "Status", "Traffic", "DR", "Price"]
+    assert any("1200.00 USD" in row for row in with_premium)

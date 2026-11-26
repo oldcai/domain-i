@@ -191,13 +191,18 @@ class TableFrame:
         show_traffic = pending or bool(traffic)
         show_dr = pending or bool(dr)
 
+        # Price follows the same rule as Traffic/DR: shown only when some row
+        # actually has a value; there is nothing to wait for, so data decides now.
+        show_price = any(r.price for r in rows)
+
         def row_cells(r: Row) -> list[str]:
             cells = [f"{r.domain:<{w0}}", f"{r.status:<{w1}}"]
             if show_traffic:
                 cells.append(cell(r.domain, traffic, wt, "Traffic"))
             if show_dr:
                 cells.append(cell(r.domain, dr, wd, "DR"))
-            cells.append(r.price or "-")
+            if show_price:
+                cells.append(r.price or "-")
             return cells
 
         header_cells = [f"{'Domain':<{w0}}", f"{'Status':<{w1}}"]
@@ -205,7 +210,8 @@ class TableFrame:
             header_cells.append(f"{'Traffic':<{wt}}")
         if show_dr:
             header_cells.append(f"{'DR':<{wd}}")
-        header_cells.append("Price")
+        if show_price:
+            header_cells.append("Price")
         lines = [line(header_cells, False, None)]
         for r in rows:
             lines.append(line(row_cells(r), r.domain == self.report.queried, r.status))

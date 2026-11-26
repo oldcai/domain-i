@@ -58,8 +58,7 @@ def test_frame_placeholder_then_values_and_column_removal() -> None:
     commands = COMMANDS
     empty = TableFrame(REPORT, commands, {}, paint=PAINT)
     lines = empty.render()
-    assert lines[0].split()[:4] == ["Domain", "Status", "Traffic", "DR"]
-    assert lines[0].split()[3] == "Price" or " Price" in lines[0]
+    assert lines[0].split() == ["Domain", "Status", "Traffic", "DR"]  # no premium -> no Price column
     b_row = next(line for line in lines if "b.com" in ANSI.sub("", line))
     assert PLACEHOLDER in ANSI.sub("", b_row)
 
@@ -172,3 +171,26 @@ def test_run_cells_reports_errors_with_names() -> None:
     errors: list[str] = []
     run_cells([("x.com", "broken")], runner, max_workers=1, collect=lambda v: None, budget=5.0, on_error=errors.append)
     assert errors == ["for x.com: boom"]
+
+
+def test_price_column_follows_data_like_traffic_and_dr() -> None:
+    premium = Report(
+        rows=[Row("p.app", "available", "827.17 USD"), Row("p.com", "taken", None)],
+        backends=[], hyphen_checked=False, hint=None,
+    )
+    commands = [("DOMAIN_I_METRICS_CMD_TRAFFIC", "t")]
+    # pending: Traffic shows placeholder, Price already decided by data
+    pending_frame = TableFrame(premium, commands, {}, paint=PAINT)
+    assert "Traffic" in pending_frame.render()[0]
+    assert "Price" in pending_frame.render()[0]
+    # final with traffic but no price anywhere -> Price column dropped
+    plain = Report(
+        rows=[Row("p.com", "taken", None)],
+        backends=[], hyphen_checked=False, hint=None,
+    )
+    final = TableFrame(plain, commands, {"p.com": [Metric("Traffic", "167/mo", "aitdk")]}, paint=PAINT).render(final=True)
+    header = final[0].split()
+    assert header == ["Domain", "Status", "Traffic"]
+    premium_final = TableFrame(premium, commands, {"p.com": [Metric("Traffic", "167/mo", "aitdk")]}, paint=PAINT).render(final=True)
+    assert premium_final[0].split() == ["Domain", "Status", "Traffic", "Price"]
+    assert any("827.17 USD" in line for line in premium_final)
