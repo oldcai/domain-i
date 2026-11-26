@@ -11,9 +11,9 @@ from datetime import date
 from pathlib import Path
 
 import pytest
-
 from conftest import FIXTURES, rdap_fixture, whois_fixture
 from fakes import Call, FakeHttp
+
 from domain_i.cli import Deps, main
 from domain_i.http import NetworkError, Response
 from domain_i.metrics import Metric
@@ -754,3 +754,132 @@ def test_availability_table_never_runs_metrics_commands(tmp_path: Path) -> None:
     h2.http.routes[SPACESHIP_URL] = spaceship_answers({}, default="available")
     h2.run(f"{name}.com")
     assert h.command_calls == [] and h2.command_calls == []
+
+
+# --- Traffic/DR columns in the availability table -------------------------------------
+
+
+CREDS2 = dict(CREDS) | {"DOMAIN_I_METRICS_CMD_TRAFFIC": "traffic-tool", "DOMAIN_I_METRICS_CMD_DR": "dr-tool --q"}
+TRAFFIC_OUT = '{"traffic": 123456, "source": "t"}'
+DR_OUT = '{"dr": 42, "source": "d"}'
+
+
+def test_table_placeholder_then_final_columns(tmp_path: Path) -> None:
+    h = Harness(tmp_path, whois={"google.com": whois_fixture("google.com")}, environ=dict(CREDS2))
+    h.http.routes[SPACESHIP_URL] = spaceship_answers({"google.app": "available"})
+    h.command_outputs = {"traffic-tool": TRAFFIC_OUT, "dr-tool": DR_OUT}
+    assert h.run("google.com") == 0
+    lines = ANSI.sub("", h.out).splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("Domain"))
+    table = lines[start:]
+    assert table[0].split()[:5] == ["Domain", "Status", "Traffic", "DR", "Price"]
+    row = next(line for line in table if line.startswith("google.com"))
+    assert row.split()[:4] == ["google.com", "taken", "123.5K", "42"] and row.endswith("this")
+    assert "google.net" in h.out and "google.app" in h.out
+    # final output: no placeholder anywhere
+    assert "..." not in h.out
+
+
+def test_table_columns_drop_when_no_values(tmp_path: Path) -> None:
+    h = Harness(tmp_path, whois={"google.com": whois_fixture("google.com")}, environ=dict(CREDS2))
+    h.http.routes[SPACESHIP_URL] = spaceship_answers({"google.app": "available"})
+    h.command_outputs = {"traffic-tool": "{}", "dr-tool": '{"dr": 0}'}
+    assert h.run("google.com") == 0
+    lines = ANSI.sub("", h.out).splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("Domain"))
+    assert lines[start].split()[:2] == ["Domain", "Status"]
+
+
+def test_table_without_taken_rows_or_commands_is_unchanged(tmp_path: Path) -> None:
+    # all available -> no new columns even with commands configured
+    name = "xq7zvkpl3qwmnotreal"
+    h = Harness(
+        tmp_path,
+        whois={f"{name}.com": whois_fixture("unregistered.com")},
+        environ=dict(CREDS2),
+    )
+    h.http.routes[SPACESHIP_URL] = spaceship_answers({}, default="available")
+    h.run(f"{name}.com")
+    lines = ANSI.sub("", h.out).splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("Domain"))
+    assert lines[start].split()[:2] == ["Domain", "Status"]
+    assert h.command_calls == []
+
+
+def test_nontty_output_with_columns_matches_valueless_except_new_cells(tmp_path: Path) -> None:
+    def table_lines(values: dict[str, str | Exception], commands: bool) -> list[list[str]]:
+        env = dict(CREDS2) if commands else dict(CREDS)
+        h = Harness(tmp_path, whois={"google.com": whois_fixture("google.com")}, environ=env)
+        h.http.routes[SPACESHIP_URL] = spaceship_answers({"google.app": "available"})
+        h.command_outputs = values
+        h.run("google.com")
+        lines = ANSI.sub("", h.stdout.getvalue()).splitlines()
+        start = next(i for i, line in enumerate(lines) if line.startswith("Domain"))
+        return [line.split() for line in lines[start:]]
+
+    with_values = table_lines({"traffic-tool": TRAFFIC_OUT, "dr-tool": DR_OUT}, commands=True)
+    disabled = table_lines({}, commands=False)
+    assert len(with_values) == len(disabled)
+    # same rows; the first two columns match everywhere
+    for row_with, row_without in zip(with_values, disabled):
+        assert row_with[:2] == row_without[:2]
+        if row_without and row_without[0] == "Taken:":
+            assert " ".join(row_with) == " ".join(row_without)
+
+
+def test_tty_final_render_equals_nontty_after_stripping_ansi(tmp_path: Path) -> None:
+    outs = []
+    for isatty in (False, True):
+        h = Harness(tmp_path, whois={"google.com": whois_fixture("google.com")}, environ=dict(CREDS2), isatty=isatty)
+        h.http.routes[SPACESHIP_URL] = spaceship_answers({"google.app": "available"})
+        h.command_outputs = {"traffic-tool": TRAFFIC_OUT, "dr-tool": DR_OUT}
+        h.run("google.com")
+        outs.append(ANSI.sub("", h.stdout.getvalue()))
+    # The TTY run paints placeholder frames too, so compare only the tail after
+    # the table header (the final frame and everything below it are identical).
+    tail = [lines[outs[i].index("Domain ") :] for i, lines in enumerate([o.splitlines() for o in outs])]
+    assert tail[0] == tail[1]
+
+
+def test_queried_domain_reuses_summary_metrics_no_extra_calls(tmp_path: Path) -> None:
+    h = Harness(tmp_path, whois={"google.com": whois_fixture("google.com")}, environ=dict(CREDS2))
+    h.http.routes[SPACESHIP_URL] = spaceship_answers({"google.app": "available"})
+    h.command_outputs = {"traffic-tool": TRAFFIC_OUT, "dr-tool": DR_OUT}
+    h.run("google.com")
+    # google.com runs exactly once per command (the summary); the table adds
+    # only the other taken rows, never the queried domain again
+    assert sorted(h.command_calls) == [
+        ["dr-tool", "--q", "google.com"],
+        ["dr-tool", "--q", "google.net"],
+        ["dr-tool", "--q", "google.org"],
+        ["traffic-tool", "google.com"],
+        ["traffic-tool", "google.net"],
+        ["traffic-tool", "google.org"],
+    ]
+
+
+def test_table_cell_failure_noted_on_stderr_with_verbose(tmp_path: Path) -> None:
+    h = Harness(tmp_path, whois={"google.com": whois_fixture("google.com")}, environ=dict(CREDS2))
+    h.http.routes[SPACESHIP_URL] = spaceship_answers({"google.app": "available"})
+    h.command_outputs = {
+        "traffic-tool": subprocess.TimeoutExpired(["traffic-tool"], 8),
+        "dr-tool": DR_OUT,
+    }
+    h.run("-v", "google.com")
+    assert "DOMAIN_I_METRICS_CMD_TRAFFIC failed" in h.stderr.getvalue()
+    row = next(line for line in ANSI.sub("", h.out).splitlines() if line.startswith("google.net"))
+    assert row.split()[2] != "..."  # final render has no placeholder
+
+
+def test_colour_for_metric_cells_follows_summary_rules(tmp_path: Path) -> None:
+    h = Harness(tmp_path, whois={"google.com": whois_fixture("google.com")}, environ=dict(CREDS2) | {"FORCE_COLOR": "1"})
+    h.http.routes[SPACESHIP_URL] = spaceship_answers({"google.app": "available"})
+    h.command_outputs = {"traffic-tool": TRAFFIC_OUT, "dr-tool": DR_OUT}
+    h.run("google.com")
+    stripped = ANSI.sub("", h.out).splitlines()
+    idx = next(i for i, line in enumerate(stripped) if "123.5K/mo" in line)
+    table_idx = next(i for i, line in enumerate(stripped) if line.startswith("google.net"))
+    # the code directly before the traffic value in the table row, not the
+    # row-leading status colour
+    before_value = re.search(r"\x1b\[([0-9;]+)m123\.5K", h.out.splitlines()[table_idx])
+    assert before_value is not None and f"\x1b[{before_value[1]}m" == ANSI.findall(h.out.splitlines()[idx])[0]

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import socket
 import urllib.error
 import urllib.request
 from collections.abc import Mapping
@@ -57,7 +56,7 @@ class UrllibHttp:
             except OSError:
                 payload = b""
             return Response(exc.code, payload)
-        except (urllib.error.URLError, socket.timeout, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
             reason = getattr(exc, "reason", exc)
             raise NetworkError(str(reason)) from exc
 

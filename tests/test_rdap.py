@@ -5,6 +5,7 @@ from pathlib import Path
 
 from conftest import rdap_fixture
 from fakes import FakeHttp
+
 from domain_i.http import NetworkError, Response
 from domain_i.rdap import BOOTSTRAP_URL, Rdap, info_from_rdap, related_url
 

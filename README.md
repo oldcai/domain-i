@@ -124,8 +124,17 @@ Backend: Spaceship
   A single word that cannot be split gets a hint to retry with spaces instead.
   `Taken: n/m` counts only the plain name in the configured TLDs (`(k unknown)`
   is added when some could not be checked).
-* The `Price` column only appears when an available name carries a premium
-  price (Spaceship backend only).
+* **Traffic / DR columns**: rows whose status is `taken` also get the metrics
+  from your metrics commands. In a terminal the table appears immediately with
+  a dim `...` placeholder in those cells and is redrawn in place as values
+  arrive (redrawn at most ~10x/second, finishes within the metrics budget);
+  when stdout is a pipe nothing is animated and only the final table is
+  printed. Columns with no value at all are dropped from the final output, so
+  with no metrics commands (or `--no-metrics`) the table looks exactly as
+  before. Traffic in the table is the compact form (`745.6M`, no `/mo` or
+  month); the full form stays in the lookup summary. At most 4 commands run at
+  once, and the domain you looked up reuses the summary's numbers instead of
+  being queried again.
 * Status colours: green `available`, yellow `taken`, dim `unknown`. Metric
   rows: cyan `Traffic`, magenta `DR`, blue `Rank`.
 
@@ -237,7 +246,8 @@ DR         42 (acme)
 Rank       #34 (tranco)
 ```
 
-Rows appear in the order Traffic, DR, Rank. A `dr` from the command replaces
+Rows appear in the order Traffic, DR, Rank. The same numbers also fill the
+Traffic / DR columns of the availability table for rows that are taken. A `dr` from the command replaces
 the Ahrefs row. Missing, zero or non-numeric values, a non-zero exit status, a
 timeout or output that is not a JSON object simply leave the rows out; run with
 `-v` to see why on stderr. `--no-metrics` skips every command.

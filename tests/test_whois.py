@@ -2,8 +2,8 @@ import subprocess
 from datetime import date
 
 import pytest
-
 from conftest import whois_fixture
+
 from domain_i.whois import parse_whois, run_whois, strip_iana
 
 

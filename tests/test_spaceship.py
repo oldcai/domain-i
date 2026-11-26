@@ -2,9 +2,9 @@ import json
 from pathlib import Path
 
 import pytest
-
 from conftest import FIXTURES
 from fakes import FakeHttp
+
 from domain_i.http import NetworkError, Response
 from domain_i.spaceship import (
     SPACESHIP_URL,

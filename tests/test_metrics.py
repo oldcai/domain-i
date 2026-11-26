@@ -2,17 +2,17 @@ import json
 import subprocess
 
 import pytest
-
 from conftest import FIXTURES
 from fakes import FakeHttp
+
 from domain_i.http import NetworkError, Response
 from domain_i.metrics import (
     AHREFS_URL,
     TRANCO_URL,
     Metric,
     abbreviate,
-    fetch_metrics,
     combine_command_metrics,
+    fetch_metrics,
     merge_metrics,
     metrics_commands,
     parse_command_output,

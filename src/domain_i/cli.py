@@ -13,11 +13,25 @@ from datetime import date
 from pathlib import Path
 from typing import Generic, TextIO, TypeVar
 
-from .availability import CheckResult, Report, check_domains, first_batch, resolve_tlds, run_availability
+from .availability import (
+    CheckResult,
+    Report,
+    check_domains,
+    first_batch,
+    resolve_tlds,
+    run_availability,
+)
 from .config import default_cache_dir, default_config_dir, read_config
 from .http import Http, UrllibHttp
 from .info import DomainInfo
-from .inputs import DomainQuery, InputError, Splitter, name_from_domain, parse_query, words_for
+from .inputs import (
+    DomainQuery,
+    InputError,
+    Splitter,
+    name_from_domain,
+    parse_query,
+    words_for,
+)
 from .metrics import (
     CommandRunner,
     Metric,
@@ -31,9 +45,12 @@ from .metrics import (
 )
 from .rdap import Rdap, info_from_rdap
 from .spaceship import Availability, check, load_credentials
+from .table_metrics import MAX_WORKERS, QUERIED_MARK, TableFrame, plan_cells, run_cells
 from .whois import WhoisRunner, default_runner, parse_whois, run_whois
 
 WHOIS_TIMEOUT = 10.0
+REDRAW_DEBOUNCE = 0.1  # seconds between TTY table repaints
+METRICS_BUDGET = 9.0  # wall-clock budget for the table's Traffic/DR cells
 BACKGROUND_BUDGET = 9.0  # seconds after start we wait for metrics / registrar privacy
 TABLE_BUDGET = 30.0  # the other-TLD check has its own HTTP timeouts; this is a backstop
 
@@ -136,8 +153,6 @@ def render_info(info: DomainInfo, today: date, metrics: Sequence[Metric], paint:
     return lines
 
 
-QUERIED_MARK = "\u2190 this"
-
 
 def render_table(report: Report, paint: Painter) -> list[str]:
     with_price = any(r.price for r in report.rows)
@@ -162,8 +177,7 @@ def render_table(report: Report, paint: Painter) -> list[str]:
 
 
 def render_report(report: Report, paint: Painter, out: TextIO) -> None:
-    for line in render_table(report, paint):
-        out.write(line + "\n")
+    out.writelines(line + "\n" for line in render_table(report, paint))
     out.write("\n")
     if report.note:
         out.write(report.note + "\n")
@@ -236,6 +250,7 @@ def main(argv: Sequence[str], deps: Deps) -> int:
         return 1 if report.rows and all(r.status == "unknown" for r in report.rows) else 0
 
     domain = query.domain
+    summary_metrics: dict[str, list[Metric]] = {}  # the looked-up domain's metrics, reused in the table
     # The other-TLD table is shown whatever the lookup says, so start it now,
     # in parallel with WHOIS; the looked-up row is pinned to the lookup result later.
     name_words = words_for(name_from_domain(domain), deps.splitter)
@@ -310,6 +325,7 @@ def main(argv: Sequence[str], deps: Deps) -> int:
         custom = combine_command_metrics(command_results)
         builtin = background.result() if background is not None else []
         metrics = merge_metrics(custom, builtin)
+        summary_metrics[domain] = metrics
         out.write(render_header(domain, "taken", paint) + "\n")
         for line in render_info(info, deps.today, metrics, paint):
             out.write(line + "\n")
@@ -326,7 +342,64 @@ def main(argv: Sequence[str], deps: Deps) -> int:
     if not first.rows or report.backend_failed:
         out.write(f"Other TLDs could not be checked ({first.backend}).\n")
         return 1 if state == "unknown" else 0
-    render_report(report, paint, out)
+
+    # Traffic/DR for the taken rows: the queried domain reuses the summary's
+    # numbers; the other taken rows run the metrics commands concurrently.
+    # The summary values arrive by now (its background work shares the same
+    # deadline and is collected above), so the queried row is never re-queried.
+    commands = [] if args.no_metrics else metrics_commands(deps.environ, config)
+    in_hand: list[Metric] = summary_metrics.get(domain, [])
+    pre: dict[str, list[Metric]] = {domain: in_hand} if in_hand else {}
+    plan = plan_cells(report, commands, known_metrics=pre)
+    cells = TableFrame(report, commands, dict(pre), paint=paint)
+    animate = deps.isatty and bool(plan)
+    height = 0
+    last_draw = 0.0
+
+    def repaint() -> None:
+        nonlocal last_draw
+        if height:
+            out.write(f"\x1b[{height}A\x1b[J")
+        text = "\n".join(cells.render()) + "\n"
+        out.write(text)
+        out.flush()
+        last_draw = time.monotonic()
+
+    def on_frame(values: dict[str, list[Metric]]) -> None:
+        cells.values = values
+        if time.monotonic() - last_draw >= REDRAW_DEBOUNCE:
+            repaint()
+
+    if animate:
+        text = "\n".join(cells.render()) + "\n"
+        out.write(text)
+        out.flush()
+        height = text.count("\n")
+
+    errors: list[str] = []
+    if plan:
+        run_cells(
+            plan,
+            deps.command_runner,
+            max_workers=MAX_WORKERS,
+            budget=METRICS_BUDGET,
+            collect=on_frame if animate else cells.values.update,
+            on_error=errors.append if args.verbose else None,
+        )
+    cells.final = True
+    if animate:
+        repaint()
+    if args.verbose:
+        for error in errors:
+            print(f"domain-i: metrics command failed {error}", file=deps.stderr)
+    for line in cells.render(final=True):
+        out.write(line + "\n")
+    out.write("\n")
+    if report.note:
+        out.write(report.note + "\n")
+    if report.hint:
+        out.write(report.hint + "\n")
+    out.write(f"Backend: {', '.join(report.backends)}\n")
     return 0
 
 
