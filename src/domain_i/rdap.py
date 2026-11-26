@@ -45,6 +45,7 @@ class Rdap:
         self._now = now
         self._timeout = timeout
         self._bootstrap: dict[str, str] | None = None
+        self._results: dict[str, RdapResult] = {}  # one lookup per domain per run
 
     # -- endpoint discovery ---------------------------------------------------
     def endpoint(self, domain: str) -> str | None:
@@ -94,6 +95,13 @@ class Rdap:
 
     # -- lookups ------------------------------------------------------------
     def lookup(self, domain: str) -> RdapResult:
+        """Memoised: availability checks, the summary and the table share answers."""
+        cached = self._results.get(domain)
+        if cached is None:
+            cached = self._results[domain] = self._lookup(domain)
+        return cached
+
+    def _lookup(self, domain: str) -> RdapResult:
         url = self.endpoint(domain)
         if url is None:
             return RdapResult("unknown", None, None, f"no RDAP server known for {domain}")

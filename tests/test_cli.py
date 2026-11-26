@@ -5,6 +5,7 @@ import json
 import re
 import subprocess
 import threading
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
@@ -43,6 +44,8 @@ class Harness:
     command_calls: list[list[str]] = field(default_factory=list)
     whois_calls: list[str] = field(default_factory=list)
     whois_override: Callable[[list[str], float], str] | None = None
+    command_runner_override: Callable[[list[str], float], str] | None = None
+    splitter: Callable[[str], list[str]] | None = None
     stdout: io.StringIO = field(default_factory=io.StringIO)
     stderr: io.StringIO = field(default_factory=io.StringIO)
 
@@ -57,6 +60,8 @@ class Harness:
 
         def command_runner(argv: list[str], timeout: float) -> str:
             self.command_calls.append(argv)
+            if self.command_runner_override is not None:
+                return self.command_runner_override(argv, timeout)
             output = self.command_outputs.get(argv[0], self.command_output)
             if isinstance(output, Exception):
                 raise output
@@ -72,7 +77,7 @@ class Harness:
             stdout=self.stdout,
             stderr=self.stderr,
             isatty=self.isatty,
-            splitter=splitter,
+            splitter=self.splitter or splitter,
             metrics=self.metrics,
             command_runner=command_runner,
         )
@@ -160,7 +165,7 @@ def test_privacy_lookup_skipped_when_whois_decides(tmp_path: Path) -> None:
     h.http.routes[SPACESHIP_URL] = spaceship_answers({})
     assert h.run("google.io") == 0
     assert "Privacy    no (Google LLC)\n" in h.out
-    assert h.http.urls() == [SPACESHIP_URL]
+    assert not [u for u in h.http.urls() if "google.io" in u]
 
 
 def test_app_privacy_follows_registrar_link_from_registry_rdap(tmp_path: Path) -> None:
@@ -260,20 +265,23 @@ def test_name_mode_with_spaceship(tmp_path: Path) -> None:
         return Response(200, json.dumps({"domains": items}).encode())
 
     h.http.routes[SPACESHIP_URL] = answer
+    for url in (VERISIGN + "foobar.com", "https://rdap.verisign.com/net/v1/domain/foobar.net",
+                "https://rdap.publicinterestregistry.org/rdap/domain/foobar.org"):
+        h.http.routes[url] = Response(200, rdap_fixture("google.com.json"))
     assert h.run("foobar") == 0
     assert h.out == (
-        "Domain       Status     Price\n"
-        "foobar.com   taken      -\n"
-        "foobar.net   taken      -\n"
-        "foobar.org   taken      -\n"
-        "foobar.app   available  1200.00 USD\n"
-        "foo-bar.com  available  -\n"
+        "Domain       Status     Created     Price\n"
+        "foobar.com   taken      1997-09-15  -\n"
+        "foobar.net   taken      1997-09-15  -\n"
+        "foobar.org   taken      1997-09-15  -\n"
+        "foobar.app   available              1200.00 USD\n"
+        "foo-bar.com  available              -\n"
         "Taken: 3/4\n"
         "\n"
         "foobar.com is taken, so foo-bar.com was checked too.\n"
         "Backend: Spaceship\n"
     )
-    assert h.whois_calls == []
+    assert h.whois_calls == []  # RDAP answered; no whois fallback needed
     assert h.command_calls == []
 
 
@@ -578,7 +586,7 @@ def test_registered_domain_row_stays_in_place_with_marker(tmp_path: Path) -> Non
     assert lines[lines.index("") + 1].startswith("Domain")
     assert table_rows(h.out) == [
         "google.net  taken",
-        "google.com  taken      \u2190 this",
+        "google.com  taken      1997-09-15  \u2190 this",
         "google.org  available",
     ]
     assert "Taken: 2/3" in h.out
@@ -657,7 +665,7 @@ def test_availability_check_starts_while_whois_runs(tmp_path: Path) -> None:
 
     h.whois_override = slow_whois
     assert h.run("--no-metrics", "google.com") == 0
-    assert seen_during_whois == [True]
+    assert seen_during_whois[0] is True  # the lookup's whois; later calls are Created fallbacks
 
 
 # --- several metrics commands ------------------------------------------------------------
@@ -758,9 +766,9 @@ def test_table_placeholder_then_final_columns(tmp_path: Path) -> None:
     lines = ANSI.sub("", h.out).splitlines()
     start = next(i for i, line in enumerate(lines) if line.startswith("Domain"))
     table = lines[start:]
-    assert table[0].split() == ["Domain", "Status", "Traffic", "DR"]
+    assert table[0].split() == ["Domain", "Status", "Created", "Traffic", "DR"]
     row = next(line for line in table if line.startswith("google.com"))
-    assert row.split()[:4] == ["google.com", "taken", "123.5K", "42"] and row.endswith("this")
+    assert row.split()[:5] == ["google.com", "taken", "1997-09-15", "123.5K", "42"] and row.endswith("this")
     assert "google.net" in h.out and "google.app" in h.out
     # final output: no placeholder anywhere
     assert "..." not in h.out
@@ -889,8 +897,105 @@ def test_price_column_only_with_premium(tmp_path: Path) -> None:
         return lines[start:]
 
     without = run({}, {})
-    assert without[0].split() == ["Domain", "Status", "Traffic", "DR"]
+    assert without[0].split() == ["Domain", "Status", "Created", "Traffic", "DR"]
     assert all("-" not in row.split() for row in without[1:-1])
     with_premium = run({"google.app": "available"}, {"google.app": [{"operation": "register", "price": 1200, "currency": "usd"}]})
-    assert with_premium[0].split() == ["Domain", "Status", "Traffic", "DR", "Price"]
+    assert with_premium[0].split() == ["Domain", "Status", "Created", "Traffic", "DR", "Price"]
     assert any("1200.00 USD" in row for row in with_premium)
+
+
+# --- Created column -----------------------------------------------------------------------
+
+
+def _created_harness(tmp_path: Path, **kw: object) -> Harness:
+    h = Harness(tmp_path, whois={"google.com": whois_fixture("google.com")}, **kw)  # type: ignore[arg-type]
+    h.http.routes[SPACESHIP_URL] = spaceship_answers({"google.app": "available"})
+    h.http.routes[VERISIGN + "google.com"] = Response(200, rdap_fixture("google.com.json"))
+    h.http.routes["https://rdap.verisign.com/net/v1/domain/google.net"] = Response(200, rdap_fixture("google.com.json"))
+    return h
+
+
+def test_created_column_with_no_metrics_and_no_commands_called(tmp_path: Path) -> None:
+    h = _created_harness(tmp_path, environ=dict(CREDS2))
+    h.http.routes["https://rdap.publicinterestregistry.org/rdap/domain/google.org"] = Response(500, b"")
+    assert h.run("--no-metrics", "google.com") == 0
+    table = table_rows(h.out)
+    lines = ANSI.sub("", h.out).splitlines()
+    assert next(line for line in lines if line.startswith("Domain")).split() == ["Domain", "Status", "Created"]
+    assert table[0].split()[:3] == ["google.com", "taken", "1997-09-15"]
+    assert table[1].split()[:3] == ["google.net", "taken", "1997-09-15"]
+    assert table[2].split() == ["google.org", "taken"]  # RDAP 500 and no whois -> empty
+    assert table[3].split() == ["google.app", "available"]  # never looked up, no placeholder
+    assert h.command_calls == []
+    assert "Created unavailable for 1 domain (RDAP and WHOIS gave no date)." in h.out
+
+
+def test_queried_row_reuses_summary_created(tmp_path: Path) -> None:
+    h = _created_harness(tmp_path, environ=dict(CREDS))
+    h.run("--no-metrics", "google.com")
+    assert h.whois_calls.count("google.com") == 1  # the lookup itself, not the table
+    assert h.http.urls().count(VERISIGN + "google.com") <= 1
+
+
+def test_created_falls_back_to_whois_then_column_drops_when_all_empty(tmp_path: Path) -> None:
+    h = Harness(tmp_path, environ=dict(CREDS), whois={"foobar.com": whois_fixture("google.com")})
+    h.http.routes[SPACESHIP_URL] = spaceship_answers({"foobar.com": "taken"}, default="available")
+    h.run("foobar")  # RDAP unrouted -> whois answers
+    assert table_rows(h.out)[0].split()[:3] == ["foobar.com", "taken", "1997-09-15"]
+    h2 = Harness(tmp_path, environ=dict(CREDS))
+    h2.http.routes[SPACESHIP_URL] = spaceship_answers({"foobar.com": "taken"}, default="available")
+    h2.run("foobar")  # neither source -> column gone, note says so
+    header = next(line for line in h2.out.splitlines() if line.startswith("Domain"))
+    assert header.split() == ["Domain", "Status"]
+    assert "Created unavailable for 1 domain" in h2.out
+
+
+def test_unknown_rows_are_not_looked_up(tmp_path: Path) -> None:
+    h = Harness(tmp_path, environ=dict(CREDS))
+    h.http.routes[SPACESHIP_URL] = spaceship_answers({"foobar.com": "unknown"}, default="available")
+    h.http.routes[BOOTSTRAP_URL] = Response(200, rdap_fixture("dns.json"))
+    h.run("foobar")
+    assert h.whois_calls == []
+    assert "Created unavailable" not in h.out
+
+
+def test_timed_out_metric_cells_are_announced(tmp_path: Path) -> None:
+    h = _created_harness(tmp_path, environ=dict(CREDS2))
+    h.command_outputs = {"traffic-tool": subprocess.TimeoutExpired(["t"], 8), "dr-tool": '{"dr": 0}'}
+    assert h.run("google.com") == 0
+    # traffic failed for google.com (in the summary) and the two other taken rows
+    assert "Traffic/DR pending for 3 domains (timed out or not ready) - run again to fill." in h.out
+    # the queried domain is asked once per command (the summary), never again by the table
+    assert sorted(c[0] for c in h.command_calls if c[-1] == "google.com") == ["dr-tool", "traffic-tool"]
+    h2 = _created_harness(tmp_path, environ=dict(CREDS2))
+    h2.command_outputs = {"traffic-tool": "{}", "dr-tool": '{"dr": 0.4}'}
+    h2.run("google.com")
+    assert "pending" not in h2.out  # answered with nothing: no value, no note
+
+
+def test_eight_rows_slow_traffic_fast_dr_all_dr_cells_filled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import domain_i.cli as cli_module
+
+    monkeypatch.setattr(cli_module, "TABLE_CELLS_BUDGET", 1.0)
+    h = Harness(tmp_path, environ=dict(CREDS2), splitter=lambda w: ["password", "manager"])
+
+    def answer(call: Call) -> Response:  # all 8 names taken
+        asked = json.loads(call.body or b"{}")["domains"]
+        return Response(200, json.dumps({"domains": [{"domain": d, "result": "taken", "premiumPricing": []} for d in asked]}).encode())
+
+    h.http.routes[SPACESHIP_URL] = answer
+    h.http.routes["*"] = Response(404, b"")  # no registry dates: Created stays out of the way
+
+    def runner(argv: list[str], timeout: float) -> str:
+        if argv[0] == "traffic-tool":
+            time.sleep(0.6)  # 8 cells / 4 workers = 2 batches > 1.0s budget
+            return TRAFFIC_OUT
+        time.sleep(0.03)
+        return DR_OUT
+
+    h.command_runner_override = runner
+    assert h.run("passwordmanager") == 0
+    rows = table_rows(h.out)
+    assert len(rows) == 8
+    assert all("42" in row.split() for row in rows), rows
+    assert "Traffic/DR pending for 4 domains" in h.out

@@ -194,3 +194,27 @@ def test_combine_command_metrics_first_value_per_field_wins() -> None:
     first = [Metric("Traffic", "1.0K/mo", "a")]
     second = [Metric("Traffic", "9.0K/mo", "b"), Metric("DR", "50", "b")]
     assert combine_command_metrics([first, [], second]) == [Metric("Traffic", "1.0K/mo", "a"), Metric("DR", "50", "b")]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('{"dr": 0.4}', []),
+        ('{"dr": 0.5, "source": "s"}', [Metric("DR", "1", "s")]),
+        ('{"dr": 2.5, "source": "s"}', [Metric("DR", "3", "s")]),
+        ('{"dr": "0"}', []),
+        ('{"dr": null, "traffic": null}', []),
+        ('{"dr": 0.0, "traffic": 0.0}', []),
+        ('{"traffic": 0.4}', []),
+        ('{"traffic": 0.5, "source": "s"}', [Metric("Traffic", "1/mo", "s")]),
+    ],
+)
+def test_values_rounding_to_zero_are_hidden(text: str, expected: list[Metric]) -> None:
+    assert parse_command_output(text) == (expected, None)
+
+
+def test_pending_flag_is_reported_as_not_ready() -> None:
+    metrics, error = parse_command_output('{"pending": true, "source": "s"}')
+    assert metrics == [] and error is not None and "no data yet" in error
+    # a value alongside the flag still counts
+    assert parse_command_output('{"pending": true, "dr": 5, "source": "s"}')[0] == [Metric("DR", "5", "s")]

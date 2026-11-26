@@ -135,10 +135,12 @@ def abbreviate(value: float) -> str:
     raise AssertionError("unreachable")
 
 
-def _positive_number(value: object) -> float | None:
+def _rounded(value: object) -> int | None:
+    """Round half up; None for non-numbers and anything that rounds to 0."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return float(value) if value > 0 else None
+    rounded = int(Decimal(str(value)).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+    return rounded if rounded > 0 else None
 
 
 def parse_command_output(text: str) -> tuple[list[Metric], str | None]:
@@ -152,12 +154,14 @@ def parse_command_output(text: str) -> tuple[list[Metric], str | None]:
     source = as_str(obj.get("source")) or "custom"
     month = as_str(obj.get("traffic_month"))
     found: list[Metric] = []
-    traffic = _positive_number(obj.get("traffic"))
-    if traffic is not None:
-        found.append(Metric("Traffic", f"{abbreviate(traffic)}/mo", f"{source}, {month}" if month else source))
-    dr = _positive_number(obj.get("dr"))
+    raw_traffic = obj.get("traffic")
+    if _rounded(raw_traffic) is not None and isinstance(raw_traffic, (int, float)):
+        found.append(Metric("Traffic", f"{abbreviate(raw_traffic)}/mo", f"{source}, {month}" if month else source))
+    dr = _rounded(obj.get("dr"))
     if dr is not None and dr <= 100:
-        found.append(Metric("DR", f"{dr:.0f}", source))
+        found.append(Metric("DR", str(dr), source))
+    if not found and obj.get("pending") is True:
+        return [], "source has no data yet (pending)"
     return found, None
 
 

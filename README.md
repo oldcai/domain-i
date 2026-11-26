@@ -84,30 +84,33 @@ Anything like `https://www.Example.com/path` is cleaned to `example.com`.
 
 ```
 $ domain-i passwordmanager
-Domain                Status
-passwordmanager.com   taken
-passwordmanager.net   taken
-passwordmanager.org   taken
-passwordmanager.app   taken
-password-manager.com  taken
-password-manager.net  taken
-password-manager.org  taken
-password-manager.app  taken
+Domain                Status  Created     Traffic  DR
+passwordmanager.com   taken   1998-11-29  82.9K    58
+passwordmanager.net   taken   2001-09-01           1
+passwordmanager.org   taken   2001-10-11
+passwordmanager.app   taken   2020-01-05
+password-manager.com  taken   2023-12-12
+password-manager.net  taken   2020-09-04
+password-manager.org  taken   2026-02-04
+password-manager.app  taken   2018-05-09
 Taken: 4/4
 
 All plain names are taken, so hyphenated variants were checked too.
 Backend: Spaceship
 
-$ domain-i teleprompter web
-Domain                Status
-teleprompterweb.com   taken
-teleprompterweb.net   available
-teleprompterweb.org   available
-teleprompterweb.app   available
-teleprompter-web.com  taken
-Taken: 1/4
+$ domain-i gta 6 mandy
+Domain           Status     Created
+gta6mandy.com    taken      2026-11-19
+gta6mandy.net    taken      2026-11-20
+gta6mandy.org    taken      2026-11-19
+gta6mandy.app    taken      2026-11-20
+gta-6-mandy.com  taken      2026-11-20
+gta-6-mandy.net  available
+gta-6-mandy.org  available
+gta-6-mandy.app  available
+Taken: 4/4
 
-teleprompterweb.com is taken, so teleprompter-web.com was checked too.
+All plain names are taken, so hyphenated variants were checked too.
 Backend: Spaceship
 ```
 
@@ -124,17 +127,27 @@ Backend: Spaceship
   A single word that cannot be split gets a hint to retry with spaces instead.
   `Taken: n/m` counts only the plain name in the configured TLDs (`(k unknown)`
   is added when some could not be checked).
-* **Traffic / DR columns**: rows whose status is `taken` also get the metrics
-  from your metrics commands. In a terminal the table appears immediately with
-  a dim `...` placeholder in those cells and is redrawn in place as values
-  arrive (redrawn at most ~10x/second, finishes within the metrics budget);
-  when stdout is a pipe nothing is animated and only the final table is
-  printed. Columns with no value at all are dropped from the final output, so
-  with no metrics commands (or `--no-metrics`) the table looks exactly as
-  before. Traffic in the table is the compact form (`745.6M`, no `/mo` or
-  month); the full form stays in the lookup summary. At most 4 commands run at
-  once, and the domain you looked up reuses the summary's numbers instead of
-  being queried again.
+* **Created / Traffic / DR columns** are filled for rows whose status is
+  `taken` (available and unknown rows are never looked up):
+  * `Created` is the registration date from the registry's RDAP record
+    (`registration` event), falling back to `whois`. It is registration data,
+    not a metric, so `--no-metrics` does not hide it.
+  * `Traffic` / `DR` come from your metrics commands
+    (see [below](#bring-your-own-metrics-source)). Table Traffic is the
+    compact form (`745.6M`, no `/mo`); the full form stays in the summary.
+    Values that round to 0 are not shown.
+  * The domain you looked up reuses the summary's values and is not asked again.
+  * In a terminal the table appears right away with a dim `...` in cells that
+    are being looked up and is redrawn in place as values arrive; over a pipe
+    only the final table is printed. A column with no value in any row is left
+    out of the final table.
+  * Each metrics command gets its own pool of 4 workers (and Created another),
+    so a slow source never starves a fast one; the table waits at most ~15 s.
+  * Cells that did not get an answer (timeout, failure, or a source saying
+    `"pending": true`) are counted in a dim line under the table, e.g.
+    `Traffic/DR pending for 2 domains (timed out or not ready) - run again to fill.`
+    or `Created unavailable for 1 domain (RDAP and WHOIS gave no date).`
+    A cell whose source answered "nothing / 0" is simply empty.
 * Status colours: green `available`, yellow `taken`, dim `unknown`. Metric
   rows: cyan `Traffic`, magenta `DR`, blue `Rank`.
 
@@ -221,6 +234,7 @@ unknown fields are ignored:
 | `traffic_month` | the month the estimate is for, e.g. `"2026-10"` |
 | `dr` | an authority score from 0 to 100 (number) |
 | `source` | name shown in brackets; defaults to `custom` |
+| `pending` | `true` when the source has no data *yet* (e.g. still computing); counted as "pending" under the table instead of shown as empty |
 
 A made-up example, `~/bin/acme-metrics`:
 
@@ -247,7 +261,8 @@ Rank       #34 (tranco)
 ```
 
 Rows appear in the order Traffic, DR, Rank. The same numbers also fill the
-Traffic / DR columns of the availability table for rows that are taken. A `dr` from the command replaces
+Traffic / DR columns of the availability table for rows that are taken.
+Numbers are rounded half up; anything that rounds to 0 is not shown. A `dr` from the command replaces
 the Ahrefs row. Missing, zero or non-numeric values, a non-zero exit status, a
 timeout or output that is not a JSON object simply leave the rows out; run with
 `-v` to see why on stderr. `--no-metrics` skips every command.

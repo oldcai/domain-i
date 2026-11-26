@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import sys
 import threading
@@ -23,6 +24,7 @@ from .availability import (
     run_availability,
 )
 from .config import default_cache_dir, default_config_dir, read_config
+from .created import fetch_created
 from .http import Http, UrllibHttp
 from .info import DomainInfo
 from .inputs import (
@@ -46,12 +48,22 @@ from .metrics import (
 )
 from .rdap import Rdap, info_from_rdap
 from .spaceship import Availability, check, load_credentials
-from .table_metrics import MAX_WORKERS, QUERIED_MARK, TableFrame, plan_cells, run_cells
+from .table_metrics import (
+    MAX_WORKERS,
+    QUERIED_MARK,
+    TableFrame,
+    plan_cells,
+    run_cells,
+    run_created,
+)
 from .whois import WhoisRunner, default_runner, parse_whois, run_whois
 
 WHOIS_TIMEOUT = 10.0
 REDRAW_DEBOUNCE = 0.1  # seconds between TTY table repaints
-METRICS_BUDGET = 9.0  # wall-clock budget for the table's Traffic/DR cells
+TABLE_CELLS_BUDGET = 15.0  # table Created/Traffic/DR cells; each command also has its own timeout
+
+
+ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
 def _terminal_width(environ: Mapping[str, str]) -> int:
@@ -64,7 +76,8 @@ def _terminal_width(environ: Mapping[str, str]) -> int:
 def _physical_lines(text: str, environ: Mapping[str, str]) -> int:
     """Rows the text occupies on screen: long lines wrap at the terminal width."""
     width = _terminal_width(environ)
-    return sum(max(1, -(-len(line) // width)) for line in text.splitlines()[:-1]) + 1
+    visible = [ANSI_ESCAPE.sub("", line) for line in text.splitlines()]
+    return sum(max(1, -(-len(line) // width)) for line in visible)
 
 
 def _terminal_fits(frame_lines: Sequence[str], environ: Mapping[str, str] | None = None) -> bool:
@@ -271,11 +284,13 @@ def main(argv: Sequence[str], deps: Deps) -> int:
 
     if not isinstance(query, DomainQuery):
         report = run_availability(query.words, tlds, None, checker)
-        code = render_availability(report, args, deps, config, paint, out)
+        code = render_availability(report, args, deps, config, paint, out, rdap=rdap)
         return 1 if report.rows and all(r.status == "unknown" for r in report.rows) else code
 
     domain = query.domain
     summary_metrics: dict[str, list[Metric]] = {}  # the looked-up domain's metrics, reused in the table
+    summary_created: dict[str, str | None] = {}  # and its registration date
+    summary_failed: set[tuple[str, str]] = set()  # (domain, command) that failed in the summary
     # The other-TLD table is shown whatever the lookup says, so start it now,
     # in parallel with WHOIS; the looked-up row is pinned to the lookup result later.
     name_words = words_for(name_from_domain(domain), deps.splitter)
@@ -342,15 +357,18 @@ def main(argv: Sequence[str], deps: Deps) -> int:
         if privacy is not None:
             info = replace(info, privacy=privacy)
         command_results: list[list[Metric]] = []
-        for name, job in command_jobs:
+        for (name, job), (_, command) in zip(command_jobs, commands):
             found, command_error = job.result()
             command_results.append(found)
-            if command_error and args.verbose:
-                print(f"domain-i: metrics command {name} failed: {command_error}", file=deps.stderr)
+            if command_error:
+                summary_failed.add((domain, command))
+                if args.verbose:
+                    print(f"domain-i: metrics command {name} failed: {command_error}", file=deps.stderr)
         custom = combine_command_metrics(command_results)
         builtin = background.result() if background is not None else []
         metrics = merge_metrics(custom, builtin)
         summary_metrics[domain] = metrics
+        summary_created[domain] = info.created.isoformat() if info.created else None
         out.write(render_header(domain, "taken", paint) + "\n")
         for line in render_info(info, deps.today, metrics, paint):
             out.write(line + "\n")
@@ -368,7 +386,18 @@ def main(argv: Sequence[str], deps: Deps) -> int:
         out.write(f"Other TLDs could not be checked ({first.backend}).\n")
         return 1 if state == "unknown" else 0
 
-    render_availability(report, args, deps, config, paint, out, summary_metrics)
+    render_availability(
+        report,
+        args,
+        deps,
+        config,
+        paint,
+        out,
+        summary_metrics,
+        rdap=rdap,
+        summary_created=summary_created,
+        summary_failed=summary_failed,
+    )
     return 0
 
 
@@ -380,6 +409,10 @@ def render_availability(
     paint: Painter,
     out: TextIO,
     summary_metrics: Mapping[str, list[Metric]] | None = None,
+    *,
+    rdap: Rdap,
+    summary_created: Mapping[str, str | None] | None = None,
+    summary_failed: set[tuple[str, str]] | None = None,
 ) -> int:
     """Print the availability table, filling Traffic/DR for taken rows.
 
@@ -391,52 +424,99 @@ def render_availability(
     in_hand: list[Metric] = known_map.get(report.queried or "", [])
     queried = report.queried
     pre: dict[str, list[Metric]] = {queried: in_hand} if in_hand and queried else {}
-    plan = plan_cells(report, commands, known_metrics=pre)
-    cells = TableFrame(report, commands, dict(pre), paint=paint)
-    animate = deps.isatty and bool(plan) and _terminal_fits(cells.render())
+    # the queried row was already asked by the summary: never ask again, even if empty
+    asked: dict[str, list[Metric]] = {queried: in_hand} if queried and queried in known_map else {}
+    plan = plan_cells(report, commands, known_metrics=asked)
+    # Created: registry data, not a metric, so --no-metrics does not affect it.
+    # The looked-up domain reuses the summary's date instead of asking again.
+    reused_created = summary_created or {}
+    created_plan = [
+        r.domain for r in report.rows if r.status == "taken" and r.domain not in reused_created
+    ]
+    cells = TableFrame(
+        report,
+        commands,
+        dict(pre),
+        paint=paint,
+        created={d: v for d, v in reused_created.items() if v},
+        pending_created=set(created_plan),
+        pending_metrics={d for d, _ in plan},
+    )
+    animate = deps.isatty and bool(plan or created_plan) and _terminal_fits(cells.render(), deps.environ)
     printed = False
     height = 0
     last_draw = 0.0
+    lock = threading.Lock()
 
     def paint_frame() -> None:
         """The single print path: after the first frame, erase, then print."""
         nonlocal printed, height, last_draw
-        if printed:
-            out.write(f"\x1b[{height}A\x1b[J")
-        text = "\n".join(cells.render()) + "\n"
-        out.write(text)
-        out.flush()
-        printed = True
-        height = _physical_lines(text, deps.environ)
-
-    def on_frame(values: dict[str, list[Metric]]) -> None:
-        nonlocal last_draw
-        cells.values = values
-        if time.monotonic() - last_draw >= REDRAW_DEBOUNCE:
-            paint_frame()
+        with lock:
+            if printed:
+                out.write(f"\x1b[{height}A\x1b[J")
+            text = "\n".join(cells.render()) + "\n"
+            out.write(text)
+            out.flush()
+            printed = True
+            height = _physical_lines(text, deps.environ)
             last_draw = time.monotonic()
+
+    def maybe_repaint() -> None:
+        if animate and time.monotonic() - last_draw >= REDRAW_DEBOUNCE:
+            paint_frame()
+
+    def on_metrics(values: dict[str, list[Metric]]) -> None:
+        with lock:
+            cells.values = {**pre, **values}  # keep the summary's numbers for the queried row
+        maybe_repaint()
+
+    def on_created(domain: str, created: str) -> None:
+        with lock:
+            cells.created[domain] = created
+        maybe_repaint()
 
     if animate:
         paint_frame()
 
     errors: list[str] = []
-    if plan:
-        run_cells(
-            plan,
-            deps.command_runner,
-            max_workers=MAX_WORKERS,
-            budget=METRICS_BUDGET,
-            collect=on_frame if animate else cells.values.update,
-            on_error=errors.append if args.verbose else None,
+    rdap_errors: list[str] = []
+    failed_created: set[str] = set(created_plan)  # until proven otherwise
+
+    def created_worker() -> None:
+        nonlocal failed_created
+        failed_created = run_created(
+            created_plan,
+            lambda d: fetch_created(d, rdap, deps.whois_runner),
+            budget=TABLE_CELLS_BUDGET,
+            collect=on_created,
+            on_error=rdap_errors.append if args.verbose else None,
         )
+
+    created_job = threading.Thread(target=created_worker, daemon=True)
+    created_job.start()
+    failed_metrics = run_cells(
+        plan,
+        deps.command_runner,
+        max_workers=MAX_WORKERS,
+        budget=TABLE_CELLS_BUDGET,
+        collect=on_metrics,
+        on_error=errors.append if args.verbose else None,
+    )
+    created_job.join(TABLE_CELLS_BUDGET + 1.0)
+    with lock:
+        cells.failed_metrics = set(failed_metrics) | (summary_failed or set())
+        cells.failed_created = set(failed_created)
     cells.final = True
     if animate:
         paint_frame()
     if args.verbose:
         for error in errors:
             print(f"domain-i: metrics command failed {error}", file=deps.stderr)
+        for error in rdap_errors:
+            print(f"domain-i: registration date not found {error}", file=deps.stderr)
     if not printed:
         out.writelines(line + "\n" for line in cells.render(final=True))
+    out.writelines(paint("unknown", note) + "\n" for note in cells.notes())
     out.write("\n")
     if report.note:
         out.write(report.note + "\n")

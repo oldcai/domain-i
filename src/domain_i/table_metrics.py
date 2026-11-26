@@ -87,69 +87,117 @@ def _cell_value(metrics: Sequence[Metric], label: str) -> str | None:
         return None
 
 
+Cell = tuple[str, str]  # (domain, command)
+
+
 def run_cells(
-    plan: Sequence[tuple[str, str]],
+    plan: Sequence[Cell],
     runner: CommandRunner,
     *,
     max_workers: int = MAX_WORKERS,
     budget: float,
     collect: Callable[[dict[str, list[Metric]]], None],
     on_error: Callable[[str], None] | None = None,
-) -> None:
-    """Run the planned cells with bounded concurrency, reporting values as they arrive.
+) -> set[Cell]:
+    """Run the planned cells, reporting values as they arrive.
 
-    Work started after ``budget`` seconds is abandoned (its threads keep the
-    pool alive but results past the budget are ignored).
+    Each command gets its own pool of ``max_workers``, so a slow command cannot
+    starve a fast one. Returns the cells that did not produce a usable answer in
+    time: failures, timeouts, "pending" answers and cells still queued at the
+    end of ``budget``. Cells that answered with no/zero values are not failures.
     """
     if not plan:
-        return
+        return set()
     deadline = time.monotonic() + budget
+    lock = threading.Lock()
+    gathered: dict[str, list[Metric]] = {}
+    answered: set[Cell] = set()
 
-    def one(domain: str, command: str) -> tuple[str, list[Metric], str | None]:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return domain, [], f"out of time (budget {budget:g}s)"
+    def one(domain: str, command: str) -> None:
+        if time.monotonic() >= deadline:
+            return
         try:
             found, error = run_metrics_command(command, domain, runner)
         except Exception as exc:  # noqa: BLE001 - an injected runner may raise anything
-            return domain, [], str(exc)
-        return domain, found, error
-
-    lock = threading.Lock()
-    gathered: dict[str, list[Metric]] = {}
-
-    def deliver(result: tuple[str, list[Metric], str | None]) -> None:
-        domain, found, error = result
+            found, error = [], str(exc)
         if time.monotonic() >= deadline:
-            return  # past the budget: treat as "no value"
-        if error and on_error is not None and "out of time" not in error:
-            on_error(f"for {domain}: {error}")
-        if found:
-            with lock:
+            return  # too late to show: still reported as not filled
+        if error:
+            if on_error is not None:
+                on_error(f"for {domain}: {error}")
+            return
+        with lock:
+            answered.add((domain, command))
+            if found:
                 gathered.setdefault(domain, []).extend(found)
-                collect(dict(gathered))
+                snapshot = {d: list(m) for d, m in gathered.items()}
+            else:
+                snapshot = None
+        if snapshot is not None:
+            collect(snapshot)
 
-    with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(one, domain, command) for domain, command in plan]
-        for future in futures:
+    by_command: dict[str, list[str]] = {}
+    for domain, command in plan:
+        by_command.setdefault(command, []).append(domain)
+    pools = [ThreadPoolExecutor(max_workers=max_workers) for _ in by_command]
+    futures: list[Future[None]] = []
+    for pool, (command, domains) in zip(pools, by_command.items()):
+        futures.extend(pool.submit(one, d, command) for d in domains)
+    _wait_until(futures, deadline)
+    for pool in pools:
+        pool.shutdown(wait=False, cancel_futures=True)
+    with lock:
+        return {cell for cell in plan if cell not in answered}
 
-            def done(f: Future[tuple[str, list[Metric], str | None]]) -> None:
-                try:
-                    deliver(f.result())
-                except Exception as exc:  # noqa: BLE001 - a broken cell is a "no value"
-                    if on_error is not None:
-                        on_error(f"uncaught: {exc}")
 
-            future.add_done_callback(done)
+def _wait_until(futures: Sequence[Future[None]], deadline: float) -> None:
+    for future in futures:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        try:
+            future.result(timeout=remaining)
+        except Exception:  # noqa: BLE001,S112 - timeouts and errors mean "not filled"
+            continue
 
 
 @dataclass
 class TableFrame:
+    """One frame of the availability table.
+
+    Async columns: ``Created`` (registry RDAP / whois, independent of metrics
+    commands) and ``Traffic`` / ``DR`` (metrics commands). While a frame is not
+    final, a column is shown when it has work in flight and its in-flight cells
+    show a placeholder; in the final frame a column stays only if some row has a
+    value. Price is decided by data from the start.
+    """
+
     report: Report
     commands: list[tuple[str, str]]
     values: dict[str, list[Metric]] = field(default_factory=dict)
     paint: Painter | None = None
     final: bool = False
+    created: dict[str, str] = field(default_factory=dict)
+    pending_created: set[str] = field(default_factory=set)
+    pending_metrics: set[str] | None = None  # None: every taken row (when commands exist)
+    failed_metrics: set[Cell] = field(default_factory=set)
+    failed_created: set[str] = field(default_factory=set)
+
+    def notes(self) -> list[str]:
+        """Say which cells are missing because lookups did not finish, not because
+        the value is zero/unknown at the source."""
+        lines: list[str] = []
+        metric_domains = {d for d, _ in self.failed_metrics}
+        if metric_domains:
+            n = len(metric_domains)
+            lines.append(
+                f"Traffic/DR pending for {n} domain{'s' if n != 1 else ''} "
+                "(timed out or not ready) - run again to fill."
+            )
+        if self.failed_created:
+            n = len(self.failed_created)
+            lines.append(f"Created unavailable for {n} domain{'s' if n != 1 else ''} (RDAP and WHOIS gave no date).")
+        return lines
 
     def render(self, final: bool | None = None) -> list[str]:
         from .cli import Painter
@@ -157,7 +205,11 @@ class TableFrame:
         is_final = self.final if final is None else final
         paint = self.paint or Painter(False)
         rows = self.report.rows
-        show = bool(self.commands) and any(r.status == "taken" for r in rows)
+        taken = {r.domain for r in rows if r.status == "taken"}
+        metric_pending = (
+            set() if not self.commands else (taken if self.pending_metrics is None else self.pending_metrics & taken)
+        )
+        created_pending = self.pending_created & taken
         traffic: dict[str, str] = {}
         dr: dict[str, str] = {}
         for domain, metrics in self.values.items():
@@ -165,22 +217,36 @@ class TableFrame:
                 value = _cell_value(metrics, label)
                 if value:
                     key[domain] = value
-        if is_final and show:
-            # in the final frame a column that resolved to no value at all is dropped
-            show = bool(traffic) or bool(dr)
-        if not show:
+        created = {d: v for d, v in self.created.items() if v}
+
+        def keep(values: dict[str, str], pending: set[str]) -> bool:
+            return bool(values) or (not is_final and bool(pending))
+
+        show_created = keep(created, created_pending)
+        show_traffic = keep(traffic, metric_pending)
+        show_dr = keep(dr, metric_pending)
+        show_price = any(r.price for r in rows)
+        if not (show_created or show_traffic or show_dr):
             return _plain_table(self.report, paint)
+
+        def width(header: str, values: dict[str, str], pending: set[str]) -> int:
+            sizes = [len(header), *(len(v) for v in values.values())]
+            if pending and not is_final:
+                sizes.append(len(PLACEHOLDER))
+            return max(sizes)
+
         w0 = max([len("Domain"), *(len(r.domain) for r in rows)])
         w1 = max([len("Status"), *(len(r.status) for r in rows)])
-        wt = max([len("Traffic"), *([len(v) for v in traffic.values()] or [len(PLACEHOLDER)])])
-        wd = max([len("DR"), *([len(v) for v in dr.values()] or [len(PLACEHOLDER)])])
+        wc = width("Created", created, created_pending)
+        wt = width("Traffic", traffic, metric_pending)
+        wd = width("DR", dr, metric_pending)
 
-        def cell(domain: str, status: str, column: dict[str, str], width: int, colour: str) -> str:
+        def cell(domain: str, column: dict[str, str], pending: set[str], w: int, colour: str | None) -> str:
             value = column.get(domain)
-            # only rows that are actually being queried may show the placeholder
-            text = value if value else (PLACEHOLDER if status == "taken" and not is_final else "")
-            padded = f"{text:<{width}}"
-            return paint(colour, padded) if paint.enabled and value else padded
+            # only cells that are actually being looked up may show the placeholder
+            text = value if value else (PLACEHOLDER if domain in pending and not is_final else "")
+            padded = f"{text:<{w}}"
+            return paint(colour, padded) if colour and paint.enabled and value else padded
 
         def line(cells: list[str], mark: bool, colour: str | None) -> str:
             if mark:
@@ -188,25 +254,21 @@ class TableFrame:
             text = "  ".join(cells).rstrip()
             return paint(colour, text) if colour else text
 
-        pending = not is_final
-        show_traffic = pending or bool(traffic)
-        show_dr = pending or bool(dr)
-
-        # Price follows the same rule as Traffic/DR: shown only when some row
-        # actually has a value; there is nothing to wait for, so data decides now.
-        show_price = any(r.price for r in rows)
-
         def row_cells(r: Row) -> list[str]:
             cells = [f"{r.domain:<{w0}}", f"{r.status:<{w1}}"]
+            if show_created:
+                cells.append(cell(r.domain, created, created_pending, wc, None))
             if show_traffic:
-                cells.append(cell(r.domain, r.status, traffic, wt, "Traffic"))
+                cells.append(cell(r.domain, traffic, metric_pending, wt, "Traffic"))
             if show_dr:
-                cells.append(cell(r.domain, r.status, dr, wd, "DR"))
+                cells.append(cell(r.domain, dr, metric_pending, wd, "DR"))
             if show_price:
                 cells.append(r.price or "-")
             return cells
 
         header_cells = [f"{'Domain':<{w0}}", f"{'Status':<{w1}}"]
+        if show_created:
+            header_cells.append(f"{'Created':<{wc}}")
         if show_traffic:
             header_cells.append(f"{'Traffic':<{wt}}")
         if show_dr:
@@ -219,6 +281,47 @@ class TableFrame:
         unknown = f" ({self.report.unknown} unknown)" if self.report.unknown else ""
         lines.append(f"Taken: {self.report.taken}/{self.report.total}{unknown}")
         return lines
+
+
+def run_created(
+    domains: Sequence[str],
+    fetch: Callable[[str], tuple[str | None, str | None]],
+    *,
+    max_workers: int = MAX_WORKERS,
+    budget: float,
+    collect: Callable[[str, str], None],
+    on_error: Callable[[str], None] | None = None,
+) -> set[str]:
+    """Fetch registration dates (at most ``max_workers`` at once, so at most that
+    many whois processes). Returns the domains that got no date in time."""
+    if not domains:
+        return set()
+    deadline = time.monotonic() + budget
+    filled: set[str] = set()
+    lock = threading.Lock()
+
+    def one(domain: str) -> None:
+        if time.monotonic() >= deadline:
+            return
+        try:
+            created, reason = fetch(domain)
+        except Exception as exc:  # noqa: BLE001 - a broken cell is a "no value"
+            created, reason = None, str(exc)
+        if time.monotonic() >= deadline:
+            return
+        if created:
+            with lock:
+                filled.add(domain)
+            collect(domain, created)
+        elif reason and on_error is not None:
+            on_error(f"for {domain}: {reason}")
+
+    pool = ThreadPoolExecutor(max_workers=max_workers)
+    futures = [pool.submit(one, d) for d in domains]
+    _wait_until(futures, deadline)
+    pool.shutdown(wait=False, cancel_futures=True)
+    with lock:
+        return {d for d in domains if d not in filled}
 
 
 def _plain_table(report: Report, paint: Painter) -> list[str]:

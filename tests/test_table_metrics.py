@@ -19,6 +19,7 @@ from domain_i.table_metrics import (
     abbreviate_cell,
     plan_cells,
     run_cells,
+    run_created,
 )
 
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
@@ -223,7 +224,9 @@ def _deps_for(tmp_path: Path, out: RecordingWriter, isatty: bool) -> Deps:
     from datetime import date
 
     from domain_i.cli import Deps
-    from domain_i.whois import default_runner
+
+    def no_whois(args: list[str], timeout: float) -> str:
+        raise FileNotFoundError("whois")  # never run the real client in tests
 
     sleeps = iter([0.05, 0.2, 0.35, 0.5])
 
@@ -233,7 +236,7 @@ def _deps_for(tmp_path: Path, out: RecordingWriter, isatty: bool) -> Deps:
 
     return Deps(
         http=UrllibHttp(),
-        whois_runner=default_runner,
+        whois_runner=no_whois,
         environ={"DOMAIN_I_METRICS_CMD_TRAFFIC": "traffic-tool", "SPACESHIP_API_KEY": "k", "SPACESHIP_API_SECRET": "s"},
         config_dir=tmp_path / "config",
         cache_dir=tmp_path / "cache",
@@ -254,6 +257,9 @@ class BulkHttp:
         self.result = result
 
     def request(self, method: str, url: str, *, headers: object, body: bytes | None = None, timeout: float = 0) -> Response:
+        if method == "GET":  # registry RDAP for the Created column
+            event = {"eventAction": "registration", "eventDate": "2020-01-02T03:04:05Z"}
+            return Response(200, json.dumps({"objectClassName": "domain", "events": [event]}).encode())
         asked = json.loads(body or b"{}").get("domains", [])
         items = [{"domain": d, "result": self.result, "premiumPricing": []} for d in asked]
         return Response(200, json.dumps({"domains": items}).encode())
@@ -295,3 +301,71 @@ def test_non_tty_prints_single_frame(tmp_path: Path) -> None:
     main(["qwertyuiop"], deps)
     assert "\x1b[" not in out.value
     assert out.value.count("Backend: ") == 1
+
+
+# --- scheduling: a slow command must not starve a fast one -----------------------------
+
+
+def test_fast_command_is_not_starved_by_slow_command() -> None:
+    domains = [f"d{i}.com" for i in range(8)]
+    plan = [(d, c) for d in domains for c in ("slow-traffic", "fast-dr")]
+
+    def runner(args: list[str], timeout: float) -> str:
+        if args[0] == "slow-traffic":
+            time.sleep(0.6)
+            return '{"traffic": 5000, "source": "t"}'
+        time.sleep(0.04)
+        return '{"dr": 30, "source": "d"}'
+
+    got: dict[str, list[Metric]] = {}
+    started = time.monotonic()
+    failed = run_cells(plan, runner, max_workers=4, budget=1.0, collect=got.update)
+    elapsed = time.monotonic() - started
+    # every DR cell is filled even though 16 slow+fast jobs share a 4-wide limit
+    assert all(any(m.label == "DR" for m in got.get(d, [])) for d in domains)
+    # the slow command needs 2 batches of 0.6s > 1.0s budget: the last batch is reported
+    assert {c for _, c in failed} == {"slow-traffic"}
+    assert len(failed) == 4
+    assert elapsed < 1.5
+
+
+def test_run_cells_reports_failed_cells_but_not_empty_ones() -> None:
+    def runner(args: list[str], timeout: float) -> str:
+        return {"empty": "{}", "zero": '{"dr": 0}', "bad": "nope", "later": '{"pending": true}'}[args[0]]
+
+    plan = [("a.com", "empty"), ("b.com", "zero"), ("c.com", "bad"), ("d.com", "later")]
+    failed = run_cells(plan, runner, max_workers=4, budget=5.0, collect=lambda v: None)
+    assert failed == {("c.com", "bad"), ("d.com", "later")}
+
+
+def test_run_created_reports_failures() -> None:
+    def fetch(domain: str) -> tuple[str | None, str | None]:
+        if domain == "slow.com":
+            time.sleep(0.5)
+        return ({"ok.com": "2020-01-02"}.get(domain), None if domain == "ok.com" else "nope")
+
+    got: dict[str, str] = {}
+    failed = run_created(["ok.com", "bad.com", "slow.com"], fetch, budget=0.2, collect=got.__setitem__)
+    assert got == {"ok.com": "2020-01-02"}
+    assert failed == {"bad.com", "slow.com"}
+
+
+def test_pending_note_counts_domains() -> None:
+    frame = TableFrame(REPORT, COMMANDS, {}, paint=PAINT)
+    frame.failed_metrics = {("a.com", "traffic-tool"), ("a.com", "dr-tool --q"), ("b.com", "dr-tool --q")}
+    frame.failed_created = {"b.com"}
+    notes = frame.notes()
+    assert notes == [
+        "Traffic/DR pending for 2 domains (timed out or not ready) - run again to fill.",
+        "Created unavailable for 1 domain (RDAP and WHOIS gave no date).",
+    ]
+    assert TableFrame(REPORT, COMMANDS, {}, paint=PAINT).notes() == []
+
+
+def test_physical_lines_ignore_ansi_and_count_wraps() -> None:
+    from domain_i.cli import _physical_lines
+
+    coloured = "\x1b[1;33m" + "x" * 60 + "\x1b[36m" + "y" * 15 + "\x1b[0m\x1b[0m"  # 75 visible, 90 raw
+    text = "\n".join([coloured] * 3) + "\n"
+    assert _physical_lines(text, {"COLUMNS": "80"}) == 3
+    assert _physical_lines("a" * 81 + "\nb\n", {"COLUMNS": "80"}) == 3  # 81 chars wrap onto 2 rows
