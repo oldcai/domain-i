@@ -175,9 +175,10 @@ class TableFrame:
         wt = max([len("Traffic"), *([len(v) for v in traffic.values()] or [len(PLACEHOLDER)])])
         wd = max([len("DR"), *([len(v) for v in dr.values()] or [len(PLACEHOLDER)])])
 
-        def cell(domain: str, column: dict[str, str], width: int, colour: str) -> str:
+        def cell(domain: str, status: str, column: dict[str, str], width: int, colour: str) -> str:
             value = column.get(domain)
-            text = value if value else ("" if is_final else PLACEHOLDER)
+            # only rows that are actually being queried may show the placeholder
+            text = value if value else (PLACEHOLDER if status == "taken" and not is_final else "")
             padded = f"{text:<{width}}"
             return paint(colour, padded) if paint.enabled and value else padded
 
@@ -198,9 +199,9 @@ class TableFrame:
         def row_cells(r: Row) -> list[str]:
             cells = [f"{r.domain:<{w0}}", f"{r.status:<{w1}}"]
             if show_traffic:
-                cells.append(cell(r.domain, traffic, wt, "Traffic"))
+                cells.append(cell(r.domain, r.status, traffic, wt, "Traffic"))
             if show_dr:
-                cells.append(cell(r.domain, dr, wd, "DR"))
+                cells.append(cell(r.domain, r.status, dr, wd, "DR"))
             if show_price:
                 cells.append(r.price or "-")
             return cells

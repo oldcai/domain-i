@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import json
 import re
 import threading
 import time
@@ -8,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from domain_i.availability import Report, Row
+from domain_i.cli import Deps
+from domain_i.http import Response, UrllibHttp
 from domain_i.metrics import Metric
 from domain_i.table_metrics import (
     PLACEHOLDER,
@@ -194,3 +198,100 @@ def test_price_column_follows_data_like_traffic_and_dr() -> None:
     premium_final = TableFrame(premium, commands, {"p.com": [Metric("Traffic", "167/mo", "demo")]}, paint=PAINT).render(final=True)
     assert premium_final[0].split() == ["Domain", "Status", "Traffic", "Price"]
     assert any("827.17 USD" in line for line in premium_final)
+
+
+# --- placeholder only for queried rows; frames: single print path ----------------------
+
+
+class RecordingWriter(io.StringIO):
+    """StringIO that remembers every write call so frames can be asserted on."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+
+    def write(self, text: str) -> int:
+        self.parts.append(text)
+        return super().write(text)
+
+    @property
+    def value(self) -> str:
+        return self.getvalue()
+
+
+def _deps_for(tmp_path: Path, out: RecordingWriter, isatty: bool) -> Deps:
+    from datetime import date
+
+    from domain_i.cli import Deps
+    from domain_i.whois import default_runner
+
+    sleeps = iter([0.05, 0.2, 0.35, 0.5])
+
+    def runner(args: list[str], timeout: float) -> str:
+        time.sleep(next(sleeps, 0.05))
+        return '{"traffic": 1000, "source": "t"}'
+
+    return Deps(
+        http=UrllibHttp(),
+        whois_runner=default_runner,
+        environ={"DOMAIN_I_METRICS_CMD_TRAFFIC": "traffic-tool", "SPACESHIP_API_KEY": "k", "SPACESHIP_API_SECRET": "s"},
+        config_dir=tmp_path / "config",
+        cache_dir=tmp_path / "cache",
+        today=date(2026, 11, 26),
+        stdout=out,
+        stderr=io.StringIO(),
+        isatty=isatty,
+        splitter=lambda w: [w],
+        metrics=None,
+        command_runner=runner,
+    )
+
+
+class BulkHttp:
+    """Spaceship bulk endpoint that answers for whatever was asked."""
+
+    def __init__(self, result: str) -> None:
+        self.result = result
+
+    def request(self, method: str, url: str, *, headers: object, body: bytes | None = None, timeout: float = 0) -> Response:
+        asked = json.loads(body or b"{}").get("domains", [])
+        items = [{"domain": d, "result": self.result, "premiumPricing": []} for d in asked]
+        return Response(200, json.dumps({"domains": items}).encode())
+
+
+def test_placeholder_only_on_queried_rows(tmp_path: Path) -> None:
+    from domain_i.cli import main
+
+    out = RecordingWriter()
+    deps = _deps_for(tmp_path, out, isatty=True)
+    deps.http = BulkHttp("available")
+    assert main(["qwertyuiop"], deps) == 0
+    assert "..." not in out.value
+
+
+def test_frames_erase_and_single_print_path(tmp_path: Path) -> None:
+    from domain_i.cli import main
+
+    out = RecordingWriter()
+    deps = _deps_for(tmp_path, out, isatty=True)
+    deps.http = BulkHttp("taken")
+    main(["qwertyuiop"], deps)
+    text = out.value
+    frames = text.split("\x1b[J")  # every erase cuts a frame boundary
+    assert len(frames) >= 3  # initial + at least one update + final
+    # every frame after the first starts with cursor-up + erase
+    assert text.count("\x1b[") >= len(frames) - 1
+    # exactly one final render: the trailing frame ends with the Backend line once
+    assert text.count("Backend: ") == 1
+    assert text.count("Taken: 4/4") == len(frames)  # once per frame, inside the frame
+
+
+def test_non_tty_prints_single_frame(tmp_path: Path) -> None:
+    from domain_i.cli import main
+
+    out = RecordingWriter()
+    deps = _deps_for(tmp_path, out, isatty=False)
+    deps.http = BulkHttp("taken")
+    main(["qwertyuiop"], deps)
+    assert "\x1b[" not in out.value
+    assert out.value.count("Backend: ") == 1

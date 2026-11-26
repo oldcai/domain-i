@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import sys
 import threading
 import time
@@ -51,6 +52,30 @@ from .whois import WhoisRunner, default_runner, parse_whois, run_whois
 WHOIS_TIMEOUT = 10.0
 REDRAW_DEBOUNCE = 0.1  # seconds between TTY table repaints
 METRICS_BUDGET = 9.0  # wall-clock budget for the table's Traffic/DR cells
+
+
+def _terminal_width(environ: Mapping[str, str]) -> int:
+    try:
+        return int(environ.get("COLUMNS") or shutil.get_terminal_size().columns)
+    except ValueError:
+        return 80
+
+
+def _physical_lines(text: str, environ: Mapping[str, str]) -> int:
+    """Rows the text occupies on screen: long lines wrap at the terminal width."""
+    width = _terminal_width(environ)
+    return sum(max(1, -(-len(line) // width)) for line in text.splitlines()[:-1]) + 1
+
+
+def _terminal_fits(frame_lines: Sequence[str], environ: Mapping[str, str] | None = None) -> bool:
+    """Animation needs the frame to fit on screen, else cursor-up lands wrong."""
+    env = environ or {}
+    height = _physical_lines("\n".join(frame_lines) + "\n", env)
+    try:
+        rows = int(env.get("LINES") or shutil.get_terminal_size().lines)
+    except ValueError:
+        rows = 24
+    return height < rows
 BACKGROUND_BUDGET = 9.0  # seconds after start we wait for metrics / registrar privacy
 TABLE_BUDGET = 30.0  # the other-TLD check has its own HTTP timeouts; this is a backstop
 
@@ -368,29 +393,31 @@ def render_availability(
     pre: dict[str, list[Metric]] = {queried: in_hand} if in_hand and queried else {}
     plan = plan_cells(report, commands, known_metrics=pre)
     cells = TableFrame(report, commands, dict(pre), paint=paint)
-    animate = deps.isatty and bool(plan)
+    animate = deps.isatty and bool(plan) and _terminal_fits(cells.render())
+    printed = False
     height = 0
     last_draw = 0.0
 
-    def repaint() -> None:
-        nonlocal last_draw
-        if height:
+    def paint_frame() -> None:
+        """The single print path: after the first frame, erase, then print."""
+        nonlocal printed, height, last_draw
+        if printed:
             out.write(f"\x1b[{height}A\x1b[J")
         text = "\n".join(cells.render()) + "\n"
         out.write(text)
         out.flush()
-        last_draw = time.monotonic()
+        printed = True
+        height = _physical_lines(text, deps.environ)
 
     def on_frame(values: dict[str, list[Metric]]) -> None:
+        nonlocal last_draw
         cells.values = values
         if time.monotonic() - last_draw >= REDRAW_DEBOUNCE:
-            repaint()
+            paint_frame()
+            last_draw = time.monotonic()
 
     if animate:
-        text = "\n".join(cells.render()) + "\n"
-        out.write(text)
-        out.flush()
-        height = text.count("\n")
+        paint_frame()
 
     errors: list[str] = []
     if plan:
@@ -404,11 +431,12 @@ def render_availability(
         )
     cells.final = True
     if animate:
-        repaint()
+        paint_frame()
     if args.verbose:
         for error in errors:
             print(f"domain-i: metrics command failed {error}", file=deps.stderr)
-    out.writelines(line + "\n" for line in cells.render(final=True))
+    if not printed:
+        out.writelines(line + "\n" for line in cells.render(final=True))
     out.write("\n")
     if report.note:
         out.write(report.note + "\n")
